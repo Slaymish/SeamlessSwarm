@@ -220,4 +220,33 @@ mod tests {
         assert!(res_ok.is_ok());
         assert!(registry.get_node("secured-node").is_some());
     }
+
+    #[test]
+    fn test_evict_offline_nodes() {
+        let registry = EphemeralRegistry::new();
+
+        let active_node = NodeProfile {
+            node_id: "active-node".to_string(),
+            os_platform: "Linux".to_string(),
+            capabilities: vec![],
+            last_seen: 900,
+            public_key: "".to_string(),
+        };
+
+        let offline_node = NodeProfile {
+            node_id: "offline-node".to_string(),
+            os_platform: "Linux".to_string(),
+            capabilities: vec![],
+            last_seen: 300,
+            public_key: "".to_string(),
+        };
+
+        registry.register_node(active_node);
+        registry.register_node(offline_node);
+
+        registry.evict_offline_nodes(1000, 500);
+
+        assert!(registry.get_node("active-node").is_some());
+        assert!(registry.get_node("offline-node").is_none());
+    }
 }
