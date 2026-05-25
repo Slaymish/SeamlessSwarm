@@ -67,6 +67,18 @@ impl EphemeralRegistry {
         }
     }
 
+    pub fn evict_offline_nodes(&self, current_time: u64, timeout_threshold: u64) {
+        if let Ok(mut lock) = self.nodes.write() {
+            lock.retain(|_, profile| {
+                if current_time >= profile.last_seen {
+                    (current_time - profile.last_seen) < timeout_threshold
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
     pub fn get_node(&self, node_id: &str) -> Option<NodeProfile> {
         self.nodes.read().ok()?.get(node_id).cloned()
     }

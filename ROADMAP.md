@@ -29,7 +29,7 @@ This document outlines the phased roadmap and task checklist required to move th
 **Goal:** Implement active swarm orchestration with resilient failure isolation mapping to the three-tier task taxonomy.
 
 - [ ] **Dynamic Capability Discovery:** Implement system-level profiling (CPU cores, memory, OS platform, GPU accelerators) in `host-background-agent`'s Scout Engine and stream updates over NNG.
-- [ ] **Ephemeral Registry indexing:** Optimize the thread-safe `EphemeralRegistry` in `compute-module-core` to dynamically index and expire profiles upon heartbeat timeout.
+- [x] **Ephemeral Registry indexing:** Optimize the thread-safe `EphemeralRegistry` in `compute-module-core` to dynamically index and expire profiles upon heartbeat timeout.
 - [ ] **Task Taxonomy Scheduling:**
   - **Stateless:** Distribute over parallel worker queues with immediate automated reassignment.
   - **Stateful:** Implement periodic metadata tracking with last-known snapshot recovery.

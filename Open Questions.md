@@ -22,8 +22,9 @@ This document tracks active open questions and unresolved architectural paramete
 - **Implication:** Affects bandwidth overhead on high-frequency state updates.
 - **Resolution Criteria:** Benchmarking storage overhead and network saturation under a 50MB state update load.
 
-## 4. Swarm Heartbeat Interval & Split-Brain Mitigation
+## 4. Swarm Heartbeat Interval & Split-Brain Mitigation [RESOLVED]
 
+- **Resolution:** Formally locked down in `@/Users/hamish/Documents/Personal/Seamless System/ADR-003: Swarm Heartbeat and Eviction Mechanics.md:1-42`.
 - **Question:** What is the optimal heartbeat interval for workstation nodes, and what is the timeout threshold before a node is marked as offline? How will the centralized orchestrator handle split-brain partitions if a group of nodes can see each other but lose contact with the Hub?
 - **Implication:** Impacts overall system scheduling stability and task reassignment latency.
 - **Resolution Criteria:** Modeling false-positive node departures against network jitter under synthetic traffic load.
