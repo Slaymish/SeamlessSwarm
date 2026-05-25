@@ -2,7 +2,7 @@ mod scout;
 mod transport;
 
 pub mod proto {
-    prost::include_proto!("seamless_swarm");
+    include!(concat!(env!("OUT_DIR"), "/seamless_swarm.rs"));
 }
 
 use scout::ScoutEngine;
