@@ -1,6 +1,10 @@
 mod scout;
 mod transport;
 
+pub mod proto {
+    prost::include_proto!("seamless_swarm");
+}
+
 use scout::ScoutEngine;
 use transport::{MdnsResponder, NngClient};
 

@@ -10,3 +10,7 @@ serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4"] }
 socket2 = "0.5"
 nng = "1.0"
+prost = "0.12"
+
+[build-dependencies]
+prost-build = "0.12"
