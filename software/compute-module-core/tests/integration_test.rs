@@ -1,5 +1,7 @@
 use compute_module_core::registry::{EphemeralRegistry, NodeProfile, Capability};
 use compute_module_core::scheduler::{ProfileScheduler, Task, TaskType, ExecutionResult};
+use compute_module_core::proto;
+use prost::Message;
 
 fn make_test_node(id: &str, last_seen: u64) -> NodeProfile {
     NodeProfile {
@@ -15,6 +17,67 @@ fn make_test_node(id: &str, last_seen: u64) -> NodeProfile {
         last_seen,
         public_key: "".to_string(),
     }
+}
+
+#[test]
+fn test_e2e_protobuf_serialization_and_registration_lifecycle() {
+    let raw_cap_gpu = proto::DeviceCapability {
+        resource_name: "GPU".to_string(),
+        value_type: "boolean".to_string(),
+        resource_value: Some(proto::device_capability::ResourceValue::BoolVal(true)),
+    };
+    
+    let raw_cap_cpu = proto::DeviceCapability {
+        resource_name: "cpu_cores".to_string(),
+        value_type: "integer".to_string(),
+        resource_value: Some(proto::device_capability::ResourceValue::IntVal(8)),
+    };
+
+    let proto_profile = proto::CapabilityProfile {
+        node_id: "proto-node-99".to_string(),
+        os_platform: "Linux".to_string(),
+        capabilities: vec![raw_cap_gpu, raw_cap_cpu],
+        updated_timestamp: 1716670000,
+    };
+
+    let mut buf = Vec::new();
+    proto_profile.encode(&mut buf).unwrap();
+
+    let decoded_profile = proto::CapabilityProfile::decode(&buf[..]).unwrap();
+    assert_eq!(decoded_profile.node_id, "proto-node-99");
+    assert_eq!(decoded_profile.os_platform, "Linux");
+    assert_eq!(decoded_profile.capabilities.len(), 2);
+
+    let mapped_capabilities: Vec<Capability> = decoded_profile.capabilities.iter().map(|c| {
+        let val_str = match &c.resource_value {
+            Some(proto::device_capability::ResourceValue::BoolVal(b)) => b.to_string(),
+            Some(proto::device_capability::ResourceValue::IntVal(i)) => i.to_string(),
+            _ => "".to_string(),
+        };
+        Capability {
+            name: c.resource_name.clone(),
+            val_type: c.value_type.clone(),
+            value: val_str,
+        }
+    }).collect();
+
+    let node_profile = NodeProfile {
+        node_id: decoded_profile.node_id.clone(),
+        os_platform: decoded_profile.os_platform.clone(),
+        capabilities: mapped_capabilities,
+        last_seen: 1200,
+        public_key: "".to_string(),
+    };
+
+    let registry = EphemeralRegistry::new();
+    registry.register_node(node_profile);
+
+    let retrieved = registry.get_node("proto-node-99").unwrap();
+    assert_eq!(retrieved.capabilities.len(), 2);
+    assert_eq!(retrieved.capabilities[0].name, "GPU");
+    assert_eq!(retrieved.capabilities[0].value, "true");
+    assert_eq!(retrieved.capabilities[1].name, "cpu_cores");
+    assert_eq!(retrieved.capabilities[1].value, "8");
 }
 
 #[test]

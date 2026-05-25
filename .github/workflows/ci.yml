@@ -52,15 +52,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
       - name: Verify Formatting
-        run: |
-          cd software/compute-module-core && cargo fmt --check
-          cd ../host-background-agent && cargo fmt --check
+        run: cargo fmt --check
       - name: Run Cargo Clippy
-        run: |
-          cd software/compute-module-core && cargo clippy -- -D warnings
-          cd ../host-background-agent && cargo clippy -- -D warnings
-      - name: Run Test Suite
-        run: |
-          cd software/compute-module-core && cargo test
-          cd ../host-background-agent && cargo test
+        run: cargo clippy --workspace -- -D warnings
+      - name: Run Workspace Test Suite
+        run: cargo test --workspace
