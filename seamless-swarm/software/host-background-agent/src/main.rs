@@ -6,7 +6,7 @@ use transport::{MdnsResponder, NngClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let responder = MdnsResponder::new("swarm-host-agent", 5353);
+    let responder = MdnsResponder::new("swarm-host-agent", 5353)?;
     responder.start_broadcast().await?;
 
     let scout = ScoutEngine::new();
@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let payload = serde_json::to_vec(&capabilities)?;
 
-    let client = NngClient::new("tcp://127.0.0.1:5555");
+    let mut client = NngClient::new("tcp://127.0.0.1:5555");
     client.connect().await?;
     client.send_payload(&payload).await?;
 
