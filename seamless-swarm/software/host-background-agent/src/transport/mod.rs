@@ -18,9 +18,6 @@ impl MdnsResponder {
             .map_err(|e| e.to_string())?;
 
         socket.set_reuse_address(true).map_err(|e| e.to_string())?;
-        
-        #[cfg(not(target_os = "windows"))]
-        socket.set_reuse_port(true).map_err(|e| e.to_string())?;
 
         let actual_socket = match socket.bind(&bind_addr.into()) {
             Ok(_) => {
@@ -48,12 +45,12 @@ impl MdnsResponder {
     pub async fn start_broadcast(&self) -> Result<(), String> {
         let dest = SocketAddr::new(Ipv4Addr::new(224, 0, 0, 251).into(), 5353);
         let payload = format!("SEAMLESS-SWARM:REGISTER:{}:{}", self.service_name, self.port);
-        let bytes = payload.as_bytes();
+        let bytes = payload.into_bytes();
         let socket_clone = self.socket.try_clone().map_err(|e| e.to_string())?;
 
         tokio::spawn(async move {
             loop {
-                let _ = socket_clone.send_to(bytes, &dest);
+                let _ = socket_clone.send_to(&bytes, &dest);
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
@@ -84,7 +81,7 @@ impl NngClient {
 
     pub async fn send_payload(&self, payload: &[u8]) -> Result<(), String> {
         if let Some(ref socket) = self.socket {
-            socket.send(payload).map_err(|e| e.to_string())?;
+            socket.send(payload).map_err(|(_, err)| err.to_string())?;
             Ok(())
         } else {
             Err("Not connected".to_string())
