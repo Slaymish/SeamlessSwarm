@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "software/compute-module-core",
+    "software/host-background-agent",
+    "tools/provision-keys"
+]
+resolver = "2"
