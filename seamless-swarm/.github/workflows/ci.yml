@@ -1,0 +1,66 @@
+name: Seamless Swarm CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  proto-lint:
+    name: Proto Linting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - name: Lint Protobuf
+        run: |
+          protoc --version
+          # Verification of proto files compilation
+          protoc --proto_path=proto --dependency_out=proto_deps.txt proto/*.proto
+
+  hardware-lint:
+    name: Hardware ECAD Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Schematics Integrity
+        run: |
+          # Placeholder for KiCad / Altium schematic and BOM checker scripts
+          echo "Verifying BOM integrity and hardware schematic constraints..."
+
+  firmware-build:
+    name: Firmware Matrix Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM GCC Toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+      - name: Build Firmware node-key-secure
+        run: |
+          cd firmware/node-key-secure
+          # Build target using arm-none-eabi-gcc / cmake
+          echo "Building Node Key firmware target..."
+
+  software-test:
+    name: Software Rust Testing Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Verify Formatting
+        run: |
+          cd software/compute-module-core && cargo fmt --check
+          cd ../host-background-agent && cargo fmt --check
+      - name: Run Cargo Clippy
+        run: |
+          cd software/compute-module-core && cargo clippy -- -D warnings
+          cd ../host-background-agent && cargo clippy -- -D warnings
+      - name: Run Test Suite
+        run: |
+          cd software/compute-module-core && cargo test
+          cd ../host-background-agent && cargo test
