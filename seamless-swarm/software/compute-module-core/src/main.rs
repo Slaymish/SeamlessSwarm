@@ -1,8 +1,5 @@
-mod registry;
-mod scheduler;
-
-use registry::{EphemeralRegistry, NodeProfile, Capability};
-use scheduler::{ProfileScheduler, Task, TaskType, ExecutionResult};
+use compute_module_core::registry::{EphemeralRegistry, NodeProfile, Capability};
+use compute_module_core::scheduler::{ProfileScheduler, Task, TaskType, ExecutionResult};
 
 #[tokio::main]
 async fn main() {

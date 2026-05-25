@@ -57,3 +57,76 @@ impl Default for EphemeralRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_register_and_get_node() {
+        let registry = EphemeralRegistry::new();
+        let profile = NodeProfile {
+            node_id: "test-node".to_string(),
+            os_platform: "Linux".to_string(),
+            capabilities: vec![
+                Capability {
+                    name: "cores".to_string(),
+                    val_type: "int".to_string(),
+                    value: "4".to_string(),
+                }
+            ],
+            last_seen: 100,
+        };
+
+        registry.register_node(profile.clone());
+        let retrieved = registry.get_node("test-node").unwrap();
+        assert_eq!(retrieved.node_id, "test-node");
+        assert_eq!(retrieved.os_platform, "Linux");
+        assert_eq!(retrieved.capabilities.len(), 1);
+        assert_eq!(retrieved.capabilities[0].name, "cores");
+    }
+
+    #[test]
+    fn test_unregister_node() {
+        let registry = EphemeralRegistry::new();
+        let profile = NodeProfile {
+            node_id: "test-node".to_string(),
+            os_platform: "Linux".to_string(),
+            capabilities: vec![],
+            last_seen: 100,
+        };
+
+        registry.register_node(profile);
+        assert!(registry.get_node("test-node").is_some());
+
+        registry.unregister_node("test-node");
+        assert!(registry.get_node("test-node").is_none());
+    }
+
+    #[test]
+    fn test_list_nodes() {
+        let registry = EphemeralRegistry::new();
+        assert_eq!(registry.list_nodes().len(), 0);
+
+        let p1 = NodeProfile {
+            node_id: "node-1".to_string(),
+            os_platform: "macOS".to_string(),
+            capabilities: vec![],
+            last_seen: 100,
+        };
+        let p2 = NodeProfile {
+            node_id: "node-2".to_string(),
+            os_platform: "Windows".to_string(),
+            capabilities: vec![],
+            last_seen: 200,
+        };
+
+        registry.register_node(p1);
+        registry.register_node(p2);
+
+        let list = registry.list_nodes();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|n| n.node_id == "node-1"));
+        assert!(list.iter().any(|n| n.node_id == "node-2"));
+    }
+}

@@ -45,3 +45,28 @@ impl Default for ScoutEngine {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_discover_capabilities_not_empty() {
+        let scout = ScoutEngine::new();
+        let caps = scout.discover_capabilities();
+        assert!(!caps.is_empty());
+        assert!(caps.iter().any(|c| c.name == "cpu_cores"));
+        assert!(caps.iter().any(|c| c.name == "has_cuda"));
+    }
+
+    #[test]
+    fn test_discover_capabilities_platform_specific() {
+        let scout = ScoutEngine::new();
+        let caps = scout.discover_capabilities();
+        if cfg!(target_os = "macos") {
+            assert!(caps.iter().any(|c| c.name == "metal_support"));
+        } else {
+            assert!(!caps.iter().any(|c| c.name == "metal_support"));
+        }
+    }
+}
