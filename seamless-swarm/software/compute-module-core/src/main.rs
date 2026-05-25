@@ -17,6 +17,7 @@ async fn main() {
             }
         ],
         last_seen: 1200,
+        public_key: "".to_string(),
     };
 
     registry.register_node(node);

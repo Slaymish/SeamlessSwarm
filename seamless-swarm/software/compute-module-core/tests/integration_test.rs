@@ -13,6 +13,7 @@ fn make_test_node(id: &str, last_seen: u64) -> NodeProfile {
             }
         ],
         last_seen,
+        public_key: "".to_string(),
     }
 }
 

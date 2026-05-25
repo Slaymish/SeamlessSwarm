@@ -14,6 +14,7 @@ pub struct NodeProfile {
     pub os_platform: String,
     pub capabilities: Vec<Capability>,
     pub last_seen: u64,
+    pub public_key: String,
 }
 
 #[derive(Clone)]
@@ -32,6 +33,32 @@ impl EphemeralRegistry {
         if let Ok(mut lock) = self.nodes.write() {
             lock.insert(profile.node_id.clone(), profile);
         }
+    }
+
+    pub fn authenticate_and_register_node(
+        &self,
+        profile: NodeProfile,
+        challenge: &[u8],
+        signature_hex: &str,
+        trusted_thumbprints: &[String],
+    ) -> Result<(), String> {
+        use sha2::Digest;
+
+        let pk_bytes = hex::decode(&profile.public_key).map_err(|e| e.to_string())?;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&pk_bytes);
+        let derived_thumbprint = hex::encode(hasher.finalize());
+
+        if !trusted_thumbprints.contains(&derived_thumbprint) {
+            return Err("Node public key thumbprint not authorized in database".to_string());
+        }
+
+        if !crate::auth::verify_challenge_response(&profile.public_key, challenge, signature_hex) {
+            return Err("Cryptographic ECDSA verification failed".to_string());
+        }
+
+        self.register_node(profile);
+        Ok(())
     }
 
     pub fn unregister_node(&self, node_id: &str) {
@@ -76,6 +103,7 @@ mod tests {
                 }
             ],
             last_seen: 100,
+            public_key: "".to_string(),
         };
 
         registry.register_node(profile.clone());
@@ -94,6 +122,7 @@ mod tests {
             os_platform: "Linux".to_string(),
             capabilities: vec![],
             last_seen: 100,
+            public_key: "".to_string(),
         };
 
         registry.register_node(profile);
@@ -113,12 +142,14 @@ mod tests {
             os_platform: "macOS".to_string(),
             capabilities: vec![],
             last_seen: 100,
+            public_key: "".to_string(),
         };
         let p2 = NodeProfile {
             node_id: "node-2".to_string(),
             os_platform: "Windows".to_string(),
             capabilities: vec![],
             last_seen: 200,
+            public_key: "".to_string(),
         };
 
         registry.register_node(p1);
@@ -128,5 +159,65 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert!(list.iter().any(|n| n.node_id == "node-1"));
         assert!(list.iter().any(|n| n.node_id == "node-2"));
+    }
+
+    #[test]
+    fn test_authenticate_and_register_node_scenarios() {
+        use p256::ecdsa::{SigningKey, signature::Signer};
+        use rand::rngs::OsRng;
+        use sha2::Digest;
+
+        let registry = EphemeralRegistry::new();
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = p256::ecdsa::VerifyingKey::from(&signing_key);
+        let pk_bytes = verifying_key.to_sec1_bytes();
+        let pk_hex = hex::encode(&pk_bytes);
+
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&pk_bytes);
+        let thumbprint = hex::encode(hasher.finalize());
+
+        let challenge = b"AUTH_CHALLENGE_01";
+        let signature: p256::ecdsa::Signature = signing_key.sign(challenge);
+        let sig_hex = hex::encode(signature.to_der());
+
+        let profile = NodeProfile {
+            node_id: "secured-node".to_string(),
+            os_platform: "macOS".to_string(),
+            capabilities: vec![],
+            last_seen: 100,
+            public_key: pk_hex.clone(),
+        };
+
+        let bad_thumbprints = vec!["unauthorized_thumbprint".to_string()];
+        let res_unauth = registry.authenticate_and_register_node(
+            profile.clone(),
+            challenge,
+            &sig_hex,
+            &bad_thumbprints,
+        );
+        assert!(res_unauth.is_err());
+        assert_eq!(
+            res_unauth.unwrap_err(),
+            "Node public key thumbprint not authorized in database"
+        );
+
+        let good_thumbprints = vec![thumbprint];
+        let res_bad_sig = registry.authenticate_and_register_node(
+            profile.clone(),
+            challenge,
+            "bad_signature_hex",
+            &good_thumbprints,
+        );
+        assert!(res_bad_sig.is_err());
+
+        let res_ok = registry.authenticate_and_register_node(
+            profile,
+            challenge,
+            &sig_hex,
+            &good_thumbprints,
+        );
+        assert!(res_ok.is_ok());
+        assert!(registry.get_node("secured-node").is_some());
     }
 }

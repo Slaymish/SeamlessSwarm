@@ -120,6 +120,7 @@ mod tests {
             os_platform: "macOS".to_string(),
             capabilities: vec![],
             last_seen: 1200,
+            public_key: "".to_string(),
         };
         registry.register_node(active_node);
         assert!(matches!(scheduler.schedule_task(&t1, "n1"), ExecutionResult::Success));
@@ -129,6 +130,7 @@ mod tests {
             os_platform: "macOS".to_string(),
             capabilities: vec![],
             last_seen: 800,
+            public_key: "".to_string(),
         };
         registry.register_node(laggy_node);
         assert!(matches!(scheduler.schedule_task(&t1, "n2"), ExecutionResult::RetryNeeded(_)));
@@ -150,6 +152,7 @@ mod tests {
             os_platform: "macOS".to_string(),
             capabilities: vec![],
             last_seen: 1200,
+            public_key: "".to_string(),
         };
         registry.register_node(node);
         assert!(matches!(scheduler.schedule_task(&t, "n1"), ExecutionResult::CheckpointSaved(_)));
@@ -171,6 +174,7 @@ mod tests {
             os_platform: "macOS".to_string(),
             capabilities: vec![],
             last_seen: 600,
+            public_key: "".to_string(),
         };
         registry.register_node(normal_node);
         assert!(matches!(scheduler.schedule_task(&t, "n1"), ExecutionResult::Success));
@@ -180,6 +184,7 @@ mod tests {
             os_platform: "macOS".to_string(),
             capabilities: vec![],
             last_seen: 300,
+            public_key: "".to_string(),
         };
         registry.register_node(high_latency_node);
         assert!(matches!(scheduler.schedule_task(&t, "n2"), ExecutionResult::ImmediateFailure(_)));
