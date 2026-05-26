@@ -42,5 +42,5 @@ This document outlines the phased roadmap and task checklist required to move th
 **Goal:** Validate entire swarm lifecycle, authentication bounds, and failure modes under stress-test conditions.
 
 - [x] **E2E Swarm Simulator:** Develop a simulation script to spin up multiple mock host-agents, connect them to a simulated compute-module-core, and assert total capability indexing and scheduling.
-- [ ] **Fault-Injection Test Suite:** Run simulated physical disconnects of workstation nodes during active execution of Stateless, Stateful, and Interactive tasks to verify the automated recovery actions.
+- [x] **Fault-Injection Test Suite:** Run simulated physical disconnects of workstation nodes during active execution of Stateless, Stateful, and Interactive tasks to verify the automated recovery actions.
 - [ ] **NAN Fallback Verification:** Test local ad-hoc communication fallback using physical proximity frames when access points strip multicast UDP packets.

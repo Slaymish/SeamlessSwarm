@@ -1,5 +1,5 @@
 use compute_module_core::registry::{EphemeralRegistry, NodeProfile, Capability};
-use compute_module_core::scheduler::{ProfileScheduler, Task, TaskType, ExecutionResult};
+use compute_module_core::scheduler::{ProfileScheduler, Task, TaskType, TaskState, ExecutionResult};
 use compute_module_core::proto;
 use prost::Message;
 
@@ -91,26 +91,26 @@ fn test_e2e_swarm_registration_and_scheduling_lifecycle() {
     registry.register_node(n1);
     registry.register_node(n2);
 
-    let stateless_task = Task {
-        task_id: "stateless-01".to_string(),
-        task_type: TaskType::StatelessIdempotent,
-        payload: vec![1, 2, 3],
-        max_retries: 3,
-    };
+    let stateless_task = Task::new(
+        "stateless-01".to_string(),
+        TaskType::StatelessIdempotent,
+        vec![1, 2, 3],
+        3,
+    );
 
-    let stateful_task = Task {
-        task_id: "stateful-01".to_string(),
-        task_type: TaskType::StatefulLongRunning,
-        payload: vec![4, 5, 6],
-        max_retries: 3,
-    };
+    let stateful_task = Task::new(
+        "stateful-01".to_string(),
+        TaskType::StatefulLongRunning,
+        vec![4, 5, 6],
+        3,
+    );
 
-    let interactive_task = Task {
-        task_id: "interactive-01".to_string(),
-        task_type: TaskType::InteractiveLowLatency,
-        payload: vec![7, 8, 9],
-        max_retries: 1,
-    };
+    let interactive_task = Task::new(
+        "interactive-01".to_string(),
+        TaskType::InteractiveLowLatency,
+        vec![7, 8, 9],
+        1,
+    );
 
     assert!(matches!(
         scheduler.schedule_task(&stateless_task, "studio-node-1"),
@@ -223,4 +223,83 @@ async fn test_e2e_nng_transport_and_heartbeat_lifecycle() {
     // 8. Test Eviction - if we check at current timestamp + 10s, it must be evicted since threshold is 5s
     registry.evict_offline_nodes(timestamp + 10, 5);
     assert!(registry.get_node("e2e-simulator-node-abc").is_none(), "Node should be evicted after timeout threshold");
+}
+
+#[test]
+fn test_e2e_fault_injection_and_taxonomy_recovery_lifecycle() {
+    let registry = EphemeralRegistry::new();
+    let scheduler = ProfileScheduler::new(registry.clone());
+
+    // 1. Register two nodes: node-primary and node-backup
+    let node_primary = make_test_node("node-primary", 1000);
+    let node_backup = make_test_node("node-backup", 1000);
+    registry.register_node(node_primary);
+    registry.register_node(node_backup);
+
+    // 2. Submit Stateless, Stateful, and Interactive tasks
+    let t_stateless = Task::new("task-stateless".to_string(), TaskType::StatelessIdempotent, vec![1, 2, 3], 2);
+    let t_stateful = Task::new("task-stateful".to_string(), TaskType::StatefulLongRunning, vec![10, 20], 2);
+    let t_interactive = Task::new("task-interactive".to_string(), TaskType::InteractiveLowLatency, vec![100], 2);
+
+    scheduler.submit_task(t_stateless);
+    scheduler.submit_task(t_stateful);
+    scheduler.submit_task(t_interactive);
+
+    // 3. Dispatch tasks (they will be balanced/assigned to registered nodes)
+    let dispatches = scheduler.dispatch_pending_tasks(1000);
+    assert_eq!(dispatches.len(), 3);
+
+    // Filter which tasks are running on node-primary
+    let mut primary_tasks = Vec::new();
+    for task_id in &["task-stateless", "task-stateful", "task-interactive"] {
+        if let Some(task) = scheduler.get_task(task_id) {
+            if let TaskState::Running { node_id, .. } = task.state {
+                if node_id == "node-primary" {
+                    primary_tasks.push(task_id.to_string());
+                }
+            }
+        }
+    }
+
+    println!("[Test] Tasks running on primary node: {:?}", primary_tasks);
+
+    // 4. Save a checkpoint on the Stateful task to simulate intermediate progress
+    scheduler.update_task_progress("task-stateful", ExecutionResult::CheckpointSaved(vec![10, 20, 30, 40]));
+    assert_eq!(scheduler.get_task("task-stateful").unwrap().payload, vec![10, 20, 30, 40]);
+
+    // 5. INJECT FAULT: node-primary goes offline!
+    registry.unregister_node("node-primary");
+    scheduler.handle_node_failure("node-primary");
+
+    // 6. Verify Recovery Transitions
+    for task_id in primary_tasks {
+        let task = scheduler.get_task(&task_id).unwrap();
+        match task.task_type {
+            TaskType::StatelessIdempotent => {
+                // Should be rolled back to Pending with incremented retry count
+                assert_eq!(task.state, TaskState::Pending);
+                assert_eq!(task.current_retry, 1);
+            }
+            TaskType::StatefulLongRunning => {
+                // Should be rolled back to Pending with preserved checkpoint payload and incremented retry count
+                assert_eq!(task.state, TaskState::Pending);
+                assert_eq!(task.current_retry, 1);
+                assert_eq!(task.payload, vec![10, 20, 30, 40]);
+            }
+            TaskType::InteractiveLowLatency => {
+                // Should immediately fail to trigger local host fallback
+                assert!(matches!(task.state, TaskState::Failed { .. }));
+                assert_eq!(task.current_retry, 0); // bypassed retries
+            }
+        }
+    }
+
+    // 7. Dispatch pending tasks again (remaining healthy backup node should pick them up!)
+    let redispatches = scheduler.dispatch_pending_tasks(1001);
+    for (task_id, node_id) in redispatches {
+        assert_eq!(node_id, "node-backup");
+        let task = scheduler.get_task(&task_id).unwrap();
+        assert!(matches!(task.state, TaskState::Running { node_id: running_node, .. } if running_node == "node-backup"));
+        println!("[Test] Successfully recovered and rescheduled task {} to backup node!", task_id);
+    }
 }

@@ -4,7 +4,7 @@ use nng::{Socket as NngSocket, Protocol as NngProtocol};
 use prost::Message;
 use sha2::Digest;
 use crate::registry::{EphemeralRegistry, NodeProfile, Capability};
-use crate::scheduler::{ProfileScheduler, Task as SchedulerTask, TaskType, ExecutionResult};
+use crate::scheduler::{ProfileScheduler, Task as SchedulerTask, TaskType, TaskState, ExecutionResult};
 use crate::proto;
 
 pub struct SwarmHubServer {
@@ -254,31 +254,56 @@ impl SwarmHubServer {
                 continue;
             }
 
-            let target_node = &nodes[0];
             println!("\n[Hub] === SCHEDULER DISPATCH INITIATED ===");
             println!("[Hub] Running profile-driven task matching...");
 
-            // Create a stateless simulated task
-            let task_id = format!("task-{:03}", task_counter);
-            let scheduler_task = SchedulerTask {
-                task_id: task_id.clone(),
-                task_type: TaskType::StatelessIdempotent,
-                payload: vec![100, 101, 102],
-                max_retries: 3,
-            };
+            // If no pending tasks, submit a couple of demonstration tasks to the scheduler queue
+            let pending_count = self.scheduler.list_tasks().iter()
+                .filter(|t| t.state == TaskState::Pending)
+                .count();
+            
+            if pending_count == 0 {
+                // Submit a Stateless and Stateful task for testing
+                let task_stateless = SchedulerTask::new(
+                    format!("task-{:03}-stateless", task_counter),
+                    TaskType::StatelessIdempotent,
+                    vec![100, 101, 102],
+                    3,
+                );
+                let task_stateful = SchedulerTask::new(
+                    format!("task-{:03}-stateful", task_counter),
+                    TaskType::StatefulLongRunning,
+                    vec![200, 201, 202],
+                    3,
+                );
+                self.scheduler.submit_task(task_stateless);
+                self.scheduler.submit_task(task_stateful);
+                task_counter += 1;
+            }
 
-            let schedule_res = self.scheduler.schedule_task(&scheduler_task, &target_node.node_id);
-            match schedule_res {
-                ExecutionResult::Success => {
-                    println!("[Hub] Task {} matched with node {}. Dispatching via NNG control frame!", task_id, target_node.node_id);
+            let current_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            // Dispatch pending tasks
+            let dispatches = self.scheduler.dispatch_pending_tasks(current_time);
+            for (task_id, node_id) in dispatches {
+                if let Some(task) = self.scheduler.get_task(&task_id) {
+                    println!("[Hub] Dispatching task {} to node {}...", task_id, node_id);
                     
-                    // Dispatch task via NNG
+                    let category = match task.task_type {
+                        TaskType::StatelessIdempotent => proto::TaskCategory::StatelessIdempotent as i32,
+                        TaskType::StatefulLongRunning => proto::TaskCategory::StatefulLongRunning as i32,
+                        TaskType::InteractiveLowLatency => proto::TaskCategory::InteractiveLowLatency as i32,
+                    };
+
                     let task_def = proto::TaskDefinition {
                         task_id,
-                        category: proto::TaskCategory::StatelessIdempotent as i32,
-                        module_target: target_node.node_id.clone(),
-                        payload: vec![12, 34, 56],
-                        max_retries: 3,
+                        category,
+                        module_target: node_id,
+                        payload: task.payload.clone(),
+                        max_retries: task.max_retries as u32,
                         timeout_ms: 10000,
                     };
 
@@ -294,11 +319,7 @@ impl SwarmHubServer {
                         eprintln!("[Hub] Failed to push task definition: {:?}", e);
                     } else {
                         println!("[Hub] Task definition sent successfully!");
-                        task_counter += 1;
                     }
-                }
-                _ => {
-                    println!("[Hub] Task schedule failed: Node resources not ready");
                 }
             }
         }
