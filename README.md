@@ -18,16 +18,17 @@ The platform relies on a secure orchestration loop bridging three physical bound
 
 For specialized specifications and tracking, refer directly to the architectural specs and logs:
 
-- **[System Blueprint](System%20Architecture%20and%20Repository%20Blueprint.md)** (Defines wire framing protocols, dynamic interactions, and execution taxonomies).
-- **[Engineering Roadmap](ROADMAP.md)** (Defines Phase 1 to Phase 4 development milestones).
-- **[Open Questions Tracker](Open%20Questions.md)** (Tracks unresolved physical and networking parameters).
+- **[System Blueprint](docs/System%20Architecture%20and%20Repository%20Blueprint.md)** (Defines wire framing protocols, dynamic interactions, and execution taxonomies).
+- **[Engineering Roadmap](docs/ROADMAP.md)** (Defines Phase 1 to Phase 4 development milestones).
+- **[Open Questions Tracker](docs/Open%20Questions.md)** (Tracks unresolved physical and networking parameters).
 - **[Scout Model Guide](docs/Scout-Capability-Discovery-Model.md)** (Hardware discovery and profiles adaptation).
 - **[NNG Transport Guide](docs/High-Performance-NNG-Framing.md)** (Peer discovery, mDNS, and raw socket fallbacks).
 - **[Secure Cryptographic Boundary](docs/ATECC608-Cryptographic-Boundary.md)** (Slot layouts, I2C interface, and handshakes).
+- **[Prototype Hardware Note](docs/prototype-hardware-note.md)** (Technical specifications and instructions for the physical prototype setup).
 - **[ADR Log]**:
-  - **[ADR-001](ADR-001-overall-architecture-evaluation.md)** (Transport & security evaluation).
-  - **[ADR-002](ADR-002:%20Architectural%20Refinement.md)** (Securing nodes via ATECC608 and NNG).
-  - **[ADR-003](ADR-003:%20Swarm%20Heartbeat%20and%20Eviction%20Mechanics.md)** (Node departure timeout & eviction).
+  - **[ADR-001](docs/decisions/ADR-001-overall-architecture-evaluation.md)** (Transport & security evaluation).
+  - **[ADR-002](docs/decisions/ADR-002:%20Architectural%20Refinement.md)** (Securing nodes via ATECC608 and NNG).
+  - **[ADR-003](docs/decisions/ADR-003:%20Swarm%20Heartbeat%20and%20Eviction%20Mechanics.md)** (Node departure timeout & eviction).
 
 ---
 
