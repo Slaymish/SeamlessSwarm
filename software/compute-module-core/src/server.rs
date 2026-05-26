@@ -43,6 +43,13 @@ impl SwarmHubServer {
                 eprintln!("[Hub] Task sender error: {}", e);
             }
         });
+
+        let self_progress = self.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = self_progress.run_progress_receiver_server("tcp://127.0.0.1:5558") {
+                eprintln!("[Hub] Task progress receiver error: {}", e);
+            }
+        });
     }
 
     // 1. Handshake Authentication Server (Req/Rep)
@@ -322,6 +329,52 @@ impl SwarmHubServer {
                     }
                 }
             }
+        }
+    }
+
+    // 4. Task Progress Receiver Server (Pull)
+    pub fn run_progress_receiver_server(&self, endpoint: &str) -> Result<(), String> {
+        let server_socket = NngSocket::new(NngProtocol::Pull0).map_err(|e| e.to_string())?;
+        server_socket.listen(endpoint).map_err(|e| e.to_string())?;
+        println!("[Hub] Task Progress Receiver listening on {}", endpoint);
+
+        loop {
+            let msg = server_socket.recv().map_err(|e| e.to_string())?;
+            let slice = msg.as_slice();
+            if slice.len() < 5 {
+                continue;
+            }
+            let payload_len = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
+            let msg_type = slice[4];
+            if msg_type != 7 {
+                continue;
+            }
+
+            let progress = match proto::TaskProgress::decode(&slice[5..5+payload_len]) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[Hub] Failed to decode TaskProgress: {}", e);
+                    continue;
+                }
+            };
+
+            println!("\n[Hub] <<< TASK PROGRESS UPDATE: {} - Status: {:?}, {:.1}%", 
+                progress.task_id, 
+                progress.status,
+                progress.progress_percentage
+            );
+
+            // Update in scheduler
+            let result = if progress.status == proto::TaskStatus::Completed as i32 {
+                ExecutionResult::Success
+            } else if !progress.checkpoint_data.is_empty() {
+                println!("[Hub] ---> Stateful Checkpoint Data Saved for task {}: Size {}B", progress.task_id, progress.checkpoint_data.len());
+                ExecutionResult::CheckpointSaved(progress.checkpoint_data)
+            } else {
+                continue;
+            };
+
+            self.scheduler.update_task_progress(&progress.task_id, result);
         }
     }
 }

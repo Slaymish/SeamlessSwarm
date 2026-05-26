@@ -17,3 +17,6 @@ nng = "1.0"
 
 [build-dependencies]
 prost-build = "0.12"
+
+[dev-dependencies]
+host-background-agent = { path = "../host-background-agent" }

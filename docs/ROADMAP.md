@@ -10,7 +10,7 @@ This document outlines the phased roadmap and task checklist required to move th
 
 - [x] **mDNS Custom Responder:** Implement a native multicast-DNS socket listener in `host-background-agent` to advertise and resolve link-local addresses without a central DHCP server.
 - [x] **NNG Communication Loop:** Implement raw TCP and NNG socket wrappers (`nng` crate) supporting request-reply patterns for authorization challenges and push-pull queues for task delivery.
-- [ ] **Packet-Drop Validation:** Benchmark node discovery join times under simulated enterprise network drops (up to 15% packet loss) to verify collision-backoff resilience.
+- [x] **Packet-Drop Validation:** Benchmark node discovery join times under simulated enterprise network drops (up to 15% packet loss) to verify collision-backoff resilience.
 
 ---
 

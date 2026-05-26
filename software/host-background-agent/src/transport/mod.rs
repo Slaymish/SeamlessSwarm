@@ -2,7 +2,9 @@ use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 use socket2::{Socket, Domain, Type, Protocol};
 use nng::{Socket as NngSocket, Protocol as NngProtocol};
+use nng::options::Options;
 use prost::Message;
+use rand::Rng;
 use crate::proto;
 use crate::secure_element::SimulatedSecureElement;
 
@@ -66,22 +68,24 @@ pub struct NngClient {
     auth_endpoint: String,
     task_endpoint: String,
     heartbeat_endpoint: String,
+    progress_endpoint: String,
     node_id: String,
     secure_element: SimulatedSecureElement,
 }
 
 impl NngClient {
-    pub fn new(auth_endpoint: &str, task_endpoint: &str, heartbeat_endpoint: &str, node_id: &str) -> Self {
+    pub fn new(auth_endpoint: &str, task_endpoint: &str, heartbeat_endpoint: &str, progress_endpoint: &str, node_id: &str) -> Self {
         Self {
             auth_endpoint: auth_endpoint.to_string(),
             task_endpoint: task_endpoint.to_string(),
             heartbeat_endpoint: heartbeat_endpoint.to_string(),
+            progress_endpoint: progress_endpoint.to_string(),
             node_id: node_id.to_string(),
             secure_element: SimulatedSecureElement::new(),
         }
     }
 
-    pub async fn run_demo_lifecycle(&self, capabilities: Vec<crate::scout::DiscoveredCapability>) -> Result<(), String> {
+    pub async fn run_demo_lifecycle(&self, capabilities: Vec<crate::proto::DeviceCapability>) -> Result<(), String> {
         println!("\n[Agent] === Beginning Swarm Handshake Lifecycle ===");
         println!("[Agent] Simulated Node Hardware ID: {}", self.node_id);
         
@@ -90,81 +94,32 @@ impl NngClient {
         println!("[Agent] Simulated Node Key Public Key: {}", hex::encode(&pk_bytes));
         println!("[Agent] Simulated Node Key Thumbprint: {}", hex::encode(&thumbprint));
 
-        // 1. Establish Req/Rep socket for handshake
-        let req_socket = NngSocket::new(NngProtocol::Req0).map_err(|e| e.to_string())?;
-        req_socket.dial(&self.auth_endpoint).map_err(|e| e.to_string())?;
+        // Establish Req/Rep socket for handshake with randomized exponential backoff retries!
+        let mut attempt = 0;
+        let mut backoff = 1.0f64; // seconds
 
-        // Send Join initiation request (fixed frame header: Length (4B) + MsgType (1B) + Payload)
-        // MsgType: 1 = Join Handshake Request
-        let init_payload = self.node_id.as_bytes();
-        let mut frame = Vec::new();
-        frame.extend_from_slice(&((init_payload.len() as u32).to_be_bytes()));
-        frame.push(1); // MsgType 1
-        frame.extend_from_slice(init_payload);
+        let (req_socket, result) = loop {
+            attempt += 1;
+            println!("[Agent] Connecting/Handshaking attempt {}...", attempt);
 
-        println!("[Agent] Sending Hello/Join frame to Appliance...");
-        req_socket.send(&frame).map_err(|(_, e)| e.to_string())?;
+            match self.execute_handshake_attempt(&pk_bytes, &thumbprint).await {
+                Ok((socket, res)) => {
+                    break (socket, res);
+                }
+                Err(e) => {
+                    eprintln!("[Agent] Handshake attempt {} failed: {}. Retrying...", attempt, e);
+                    
+                    // Generate randomized jitter backoff capped at 30 seconds
+                    // backoff = min(30, backoff * 1.5) + random jitter
+                    let jitter: f64 = rand::thread_rng().gen_range(0.0..1.0);
+                    let sleep_secs = f64::min(30.0, backoff * 1.5) + jitter;
+                    backoff = sleep_secs;
 
-        // 2. Receive HandshakeChallenge
-        let reply_msg = req_socket.recv().map_err(|e| e.to_string())?;
-        let reply_slice = reply_msg.as_slice();
-        if reply_slice.len() < 5 {
-            return Err("Invalid protocol frame received from server".to_string());
-        }
-        let payload_len = u32::from_be_bytes([reply_slice[0], reply_slice[1], reply_slice[2], reply_slice[3]]) as usize;
-        let msg_type = reply_slice[4];
-        if msg_type != 2 {
-            return Err(format!("Expected challenge frame type (2), got {}", msg_type));
-        }
-
-        let challenge = proto::HandshakeChallenge::decode(&reply_slice[5..5 + payload_len])
-            .map_err(|e| format!("Failed to decode challenge: {}", e))?;
-
-        println!("[Agent] Received high-entropy cryptographic challenge: {}", hex::encode(&challenge.high_entropy_token));
-
-        // 3. Sign the challenge using simulated secure element
-        let sig = self.secure_element.sign_challenge(&challenge.high_entropy_token);
-        println!("[Agent] Generated secure signature on workstation: {}", hex::encode(&sig));
-
-        // 4. Construct HandshakeResponse
-        let response = proto::HandshakeResponse {
-            signature: sig,
-            identity: Some(proto::HardwareIdentity {
-                node_uuid: self.node_id.clone(),
-                ecdsa_public_key: pk_bytes,
-                static_thumbprint: thumbprint,
-            }),
+                    println!("[Agent] Backing off for {:.2} seconds before re-discovery...", sleep_secs);
+                    tokio::time::sleep(Duration::from_secs_f64(sleep_secs)).await;
+                }
+            }
         };
-
-        let mut encoded_response = Vec::new();
-        response.encode(&mut encoded_response).unwrap();
-
-        let mut resp_frame = Vec::new();
-        resp_frame.extend_from_slice(&((encoded_response.len() as u32).to_be_bytes()));
-        resp_frame.push(3); // MsgType 3 = HandshakeResponse
-        resp_frame.extend_from_slice(&encoded_response);
-
-        println!("[Agent] Sending challenge response signature and HardwareIdentity to Appliance...");
-        req_socket.send(&resp_frame).map_err(|(_, e)| e.to_string())?;
-
-        // 5. Receive HandshakeResult
-        let result_msg = req_socket.recv().map_err(|e| e.to_string())?;
-        let result_slice = result_msg.as_slice();
-        if result_slice.len() < 5 {
-            return Err("Invalid result frame".to_string());
-        }
-        let res_len = u32::from_be_bytes([result_slice[0], result_slice[1], result_slice[2], result_slice[3]]) as usize;
-        let res_msg_type = result_slice[4];
-        if res_msg_type != 4 {
-            return Err(format!("Expected result frame type (4), got {}", res_msg_type));
-        }
-
-        let result = proto::HandshakeResult::decode(&result_slice[5..5 + res_len])
-            .map_err(|e| format!("Failed to decode handshake result: {}", e))?;
-
-        if !result.authenticated {
-            return Err(format!("Authentication failed: {}", result.message));
-        }
 
         println!("[Agent] SUCCESS: Swarm Authentication Granted! Session Token: {}", result.session_token);
         println!("[Agent] Greeting message: {}", result.message);
@@ -176,29 +131,10 @@ impl NngClient {
         let push_socket = NngSocket::new(NngProtocol::Push0).map_err(|e| e.to_string())?;
         push_socket.dial(&self.heartbeat_endpoint).map_err(|e| e.to_string())?;
 
-        let mut proto_caps = Vec::new();
-        for cap in capabilities {
-            let resource_value = if cap.val_type == "boolean" {
-                Some(proto::device_capability::ResourceValue::BoolVal(cap.value == "true"))
-            } else if cap.val_type == "integer" {
-                Some(proto::device_capability::ResourceValue::IntVal(cap.value.parse().unwrap_or(0)))
-            } else if cap.val_type == "float" {
-                Some(proto::device_capability::ResourceValue::DoubleVal(cap.value.parse().unwrap_or(0.0)))
-            } else {
-                Some(proto::device_capability::ResourceValue::StringVal(cap.value))
-            };
-
-            proto_caps.push(proto::DeviceCapability {
-                resource_name: cap.name,
-                value_type: cap.val_type,
-                resource_value,
-            });
-        }
-
         let profile = proto::CapabilityProfile {
             node_id: self.node_id.clone(),
             os_platform: std::env::consts::OS.to_string(),
-            capabilities: proto_caps,
+            capabilities,
             updated_timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -223,7 +159,15 @@ impl NngClient {
         println!("[Agent] Listening for scheduled swarm tasks on {}...", self.task_endpoint);
 
         let _node_id_clone = self.node_id.clone();
+        let progress_endpoint_clone = self.progress_endpoint.clone();
         tokio::spawn(async move {
+            // Setup Progress Socket
+            let progress_socket = NngSocket::new(NngProtocol::Push0).expect("Failed to create progress socket");
+            if let Err(e) = progress_socket.dial(&progress_endpoint_clone) {
+                eprintln!("[Agent] Failed to dial progress endpoint: {}", e);
+                return;
+            }
+
             loop {
                 match pull_socket.recv() {
                     Ok(task_msg) => {
@@ -235,10 +179,77 @@ impl NngClient {
                                 if let Ok(task) = proto::TaskDefinition::decode(&task_slice[5..5+task_len]) {
                                     println!("\n[Agent] >>> RECEIVED TASK FROM SWARM: {}", task.task_id);
                                     println!("[Agent] Target: {}, Category: {:?}, Payload Size: {}B", task.module_target, task.category, task.payload.len());
-                                    println!("[Agent] Simulating execution...");
+                                    println!("[Agent] Simulating execution with live progress reporting...");
                                     
-                                    // Simulate processing
-                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                    // 1. Report 33% progress + intermediate checkpoint for Stateful
+                                    tokio::time::sleep(Duration::from_millis(150)).await;
+                                    {
+                                        let checkpoint_data = if task.category == proto::TaskCategory::StatefulLongRunning as i32 {
+                                            vec![88, 99, 111, 222] // Simulated stateful checkpoint data
+                                        } else {
+                                            vec![]
+                                        };
+
+                                        let progress = proto::TaskProgress {
+                                            task_id: task.task_id.clone(),
+                                            status: proto::TaskStatus::Running as i32,
+                                            progress_percentage: 33.3,
+                                            checkpoint_data,
+                                            error_message: "".to_string(),
+                                        };
+
+                                        let mut buf = Vec::new();
+                                        progress.encode(&mut buf).unwrap();
+
+                                        let mut frame = Vec::new();
+                                        frame.extend_from_slice(&((buf.len() as u32).to_be_bytes()));
+                                        frame.push(7); // MsgType 7 = TaskProgress
+                                        frame.extend_from_slice(&buf);
+                                        let _ = progress_socket.send(&frame);
+                                    }
+
+                                    // 2. Report 66% progress
+                                    tokio::time::sleep(Duration::from_millis(150)).await;
+                                    {
+                                        let progress = proto::TaskProgress {
+                                            task_id: task.task_id.clone(),
+                                            status: proto::TaskStatus::Running as i32,
+                                            progress_percentage: 66.6,
+                                            checkpoint_data: vec![],
+                                            error_message: "".to_string(),
+                                        };
+
+                                        let mut buf = Vec::new();
+                                        progress.encode(&mut buf).unwrap();
+
+                                        let mut frame = Vec::new();
+                                        frame.extend_from_slice(&((buf.len() as u32).to_be_bytes()));
+                                        frame.push(7); // MsgType 7 = TaskProgress
+                                        frame.extend_from_slice(&buf);
+                                        let _ = progress_socket.send(&frame);
+                                    }
+
+                                    // 3. Report Completed progress
+                                    tokio::time::sleep(Duration::from_millis(150)).await;
+                                    {
+                                        let progress = proto::TaskProgress {
+                                            task_id: task.task_id.clone(),
+                                            status: proto::TaskStatus::Completed as i32,
+                                            progress_percentage: 100.0,
+                                            checkpoint_data: vec![],
+                                            error_message: "".to_string(),
+                                        };
+
+                                        let mut buf = Vec::new();
+                                        progress.encode(&mut buf).unwrap();
+
+                                        let mut frame = Vec::new();
+                                        frame.extend_from_slice(&((buf.len() as u32).to_be_bytes()));
+                                        frame.push(7); // MsgType 7 = TaskProgress
+                                        frame.extend_from_slice(&buf);
+                                        let _ = progress_socket.send(&frame);
+                                    }
+
                                     println!("[Agent] Task {} completed successfully!", task.task_id);
                                 }
                             }
@@ -253,5 +264,78 @@ impl NngClient {
         });
 
         Ok(())
+    }
+
+    async fn execute_handshake_attempt(&self, pk_bytes: &[u8], thumbprint: &[u8]) -> Result<(NngSocket, proto::HandshakeResult), String> {
+        let req_socket = NngSocket::new(NngProtocol::Req0).map_err(|e| e.to_string())?;
+        
+        // Set short timeouts of 2 seconds to fail quickly under heavy packet drops!
+        req_socket.set_opt::<nng::options::RecvTimeout>(Some(Duration::from_millis(2000))).map_err(|e: nng::Error| e.to_string())?;
+        req_socket.set_opt::<nng::options::SendTimeout>(Some(Duration::from_millis(2000))).map_err(|e: nng::Error| e.to_string())?;
+
+        req_socket.dial(&self.auth_endpoint).map_err(|e| e.to_string())?;
+
+        let init_payload = self.node_id.as_bytes();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&((init_payload.len() as u32).to_be_bytes()));
+        frame.push(1); // MsgType 1
+        frame.extend_from_slice(init_payload);
+
+        req_socket.send(&frame).map_err(|(_, e)| e.to_string())?;
+
+        let reply_msg = req_socket.recv().map_err(|e| e.to_string())?;
+        let reply_slice = reply_msg.as_slice();
+        if reply_slice.len() < 5 {
+            return Err("Invalid protocol frame received from server".to_string());
+        }
+        let payload_len = u32::from_be_bytes([reply_slice[0], reply_slice[1], reply_slice[2], reply_slice[3]]) as usize;
+        let msg_type = reply_slice[4];
+        if msg_type != 2 {
+            return Err(format!("Expected challenge frame type (2), got {}", msg_type));
+        }
+
+        let challenge = proto::HandshakeChallenge::decode(&reply_slice[5..5 + payload_len])
+            .map_err(|e| format!("Failed to decode challenge: {}", e))?;
+
+        let sig = self.secure_element.sign_challenge(&challenge.high_entropy_token);
+
+        let response = proto::HandshakeResponse {
+            signature: sig,
+            identity: Some(proto::HardwareIdentity {
+                node_uuid: self.node_id.clone(),
+                ecdsa_public_key: pk_bytes.to_vec(),
+                static_thumbprint: thumbprint.to_vec(),
+            }),
+        };
+
+        let mut encoded_response = Vec::new();
+        response.encode(&mut encoded_response).unwrap();
+
+        let mut resp_frame = Vec::new();
+        resp_frame.extend_from_slice(&((encoded_response.len() as u32).to_be_bytes()));
+        resp_frame.push(3); // MsgType 3 = HandshakeResponse
+        resp_frame.extend_from_slice(&encoded_response);
+
+        req_socket.send(&resp_frame).map_err(|(_, e)| e.to_string())?;
+
+        let result_msg = req_socket.recv().map_err(|e| e.to_string())?;
+        let result_slice = result_msg.as_slice();
+        if result_slice.len() < 5 {
+            return Err("Invalid result frame".to_string());
+        }
+        let res_len = u32::from_be_bytes([result_slice[0], result_slice[1], result_slice[2], result_slice[3]]) as usize;
+        let res_msg_type = result_slice[4];
+        if res_msg_type != 4 {
+            return Err(format!("Expected result frame type (4), got {}", res_msg_type));
+        }
+
+        let result = proto::HandshakeResult::decode(&result_slice[5..5 + res_len])
+            .map_err(|e| format!("Failed to decode handshake result: {}", e))?;
+
+        if !result.authenticated {
+            return Err(format!("Authentication failed: {}", result.message));
+        }
+
+        Ok((req_socket, result))
     }
 }

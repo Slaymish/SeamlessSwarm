@@ -182,6 +182,7 @@ name = "compute-module-core"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "host-background-agent",
  "nng",
  "p256",
  "prost",

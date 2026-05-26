@@ -1,13 +1,5 @@
-mod scout;
-mod transport;
-mod secure_element;
-
-pub mod proto {
-    include!(concat!(env!("OUT_DIR"), "/seamless_swarm.rs"));
-}
-
-use scout::ScoutEngine;
-use transport::{MdnsResponder, NngClient};
+use host_background_agent::scout::ScoutEngine;
+use host_background_agent::transport::{MdnsResponder, NngClient};
 use uuid::Uuid;
 
 #[tokio::main]
@@ -21,10 +13,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run capability discovery
     let scout = ScoutEngine::new();
-    let capabilities = scout.discover_capabilities();
-    println!("[Agent] Discovered Local Machine Capabilities:");
+    let capabilities = scout.discover_capabilities_async().await;
+    println!("[Agent] Discovered Local Machine Capabilities (Scout Model Async):");
     for cap in &capabilities {
-        println!("  - {}: {} ({})", cap.name, cap.value, cap.val_type);
+        let val_str = match &cap.resource_value {
+            Some(host_background_agent::proto::device_capability::ResourceValue::BoolVal(b)) => b.to_string(),
+            Some(host_background_agent::proto::device_capability::ResourceValue::IntVal(i)) => i.to_string(),
+            Some(host_background_agent::proto::device_capability::ResourceValue::DoubleVal(d)) => format!("{:.2}", d),
+            Some(host_background_agent::proto::device_capability::ResourceValue::StringVal(s)) => s.clone(),
+            None => "".to_string(),
+        };
+        println!("  - {}: {} ({})", cap.resource_name, val_str, cap.value_type);
     }
 
     // Generate/Reuse simulated unique node id
@@ -35,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "tcp://127.0.0.1:5555", // Authentication Port (Req/Rep)
         "tcp://127.0.0.1:5556", // Task Distribution Port (Pull)
         "tcp://127.0.0.1:5557", // Heartbeat / Profile Port (Push)
+        "tcp://127.0.0.1:5558", // Progress / Checkpoint Port (Pull receiver on Hub)
         &node_uuid,
     );
 
