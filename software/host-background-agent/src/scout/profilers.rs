@@ -3,6 +3,7 @@ use std::thread;
 use crate::proto::DeviceCapability;
 use crate::proto::device_capability::ResourceValue;
 
+#[allow(async_fn_in_trait)]
 pub trait Profiler: Send + Sync {
     async fn profile(&self) -> Result<Vec<DeviceCapability>, String>;
 }

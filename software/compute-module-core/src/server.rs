@@ -3,7 +3,7 @@ use std::time::Duration;
 use nng::{Socket as NngSocket, Protocol as NngProtocol};
 use prost::Message;
 use sha2::Digest;
-use log::{info, warn, error, debug};
+use log::{info, error, debug};
 use crate::registry::{EphemeralRegistry, NodeProfile, Capability};
 use crate::scheduler::{ProfileScheduler, Task as SchedulerTask, TaskType, TaskState, ExecutionResult};
 use crate::proto;
