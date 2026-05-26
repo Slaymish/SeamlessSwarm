@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     println!("=== Seamless Swarm: Central Hub / ARM Appliance (Simulation Mode) ===");
     
     let registry = EphemeralRegistry::new();

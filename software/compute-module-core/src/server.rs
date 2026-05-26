@@ -3,6 +3,7 @@ use std::time::Duration;
 use nng::{Socket as NngSocket, Protocol as NngProtocol};
 use prost::Message;
 use sha2::Digest;
+use log::{info, warn, error, debug};
 use crate::registry::{EphemeralRegistry, NodeProfile, Capability};
 use crate::scheduler::{ProfileScheduler, Task as SchedulerTask, TaskType, TaskState, ExecutionResult};
 use crate::proto;
@@ -56,7 +57,7 @@ impl SwarmHubServer {
     async fn run_auth_server(&self, endpoint: &str) -> Result<(), String> {
         let server_socket = NngSocket::new(NngProtocol::Rep0).map_err(|e| e.to_string())?;
         server_socket.listen(endpoint).map_err(|e| e.to_string())?;
-        println!("[Hub] Secure Cryptographic Handshake server listening on {}", endpoint);
+        info!("[Hub] Secure Cryptographic Handshake server listening on {}", endpoint);
 
         loop {
             // Receive Join request
@@ -68,17 +69,17 @@ impl SwarmHubServer {
             let _payload_len = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
             let msg_type = slice[4];
             if msg_type != 1 {
-                eprintln!("[Hub] Authentication Error: Expected Join initiation (1), received {}", msg_type);
+                error!("[Hub] Authentication Error: Expected Join initiation (1), received {}", msg_type);
                 continue;
             }
 
             let node_id = String::from_utf8_lossy(&slice[5..]);
-            println!("\n[Hub] <<< Handshake Request initiated by Workstation: {}", node_id);
+            info!("[Hub] Handshake Request initiated by Workstation: {}", node_id);
 
             // Generate high-entropy 32-byte challenge token
             let mut challenge_token = vec![0u8; 32];
             rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut challenge_token);
-            println!("[Hub] Generated high-entropy challenge: {}", hex::encode(&challenge_token));
+            debug!("[Hub] Generated high-entropy challenge: {}", hex::encode(&challenge_token));
 
             let challenge = proto::HandshakeChallenge {
                 high_entropy_token: challenge_token.clone(),
@@ -97,7 +98,7 @@ impl SwarmHubServer {
             challenge_frame.push(2); // MsgType 2 = HandshakeChallenge
             challenge_frame.extend_from_slice(&encoded_challenge);
 
-            println!("[Hub] Sending challenge frame to node...");
+            debug!("[Hub] Sending challenge frame to node...");
             server_socket.send(&challenge_frame).map_err(|(_, e)| e.to_string())?;
 
             // Receive HandshakeResponse
@@ -109,14 +110,14 @@ impl SwarmHubServer {
             let resp_len = u32::from_be_bytes([resp_slice[0], resp_slice[1], resp_slice[2], resp_slice[3]]) as usize;
             let resp_msg_type = resp_slice[4];
             if resp_msg_type != 3 {
-                eprintln!("[Hub] Authentication Error: Expected Response frame (3), got {}", resp_msg_type);
+                error!("[Hub] Authentication Error: Expected Response frame (3), got {}", resp_msg_type);
                 continue;
             }
 
             let response = match proto::HandshakeResponse::decode(&resp_slice[5..5 + resp_len]) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("[Hub] Failed to decode response payload: {}", e);
+                    error!("[Hub] Failed to decode response payload: {}", e);
                     continue;
                 }
             };
@@ -131,21 +132,21 @@ impl SwarmHubServer {
                 let pk_hex = hex::encode(&identity.ecdsa_public_key);
                 let sig_hex = hex::encode(&response.signature);
 
-                println!("[Hub] Verifying cryptographic ECDSA signature from node: {}", verified_node_id);
-                println!("[Agent PubKey] {}", pk_hex);
-                println!("[Agent Signature] {}", sig_hex);
+                info!("[Hub] Verifying cryptographic ECDSA signature from node: {}", verified_node_id);
+                debug!("[Agent PubKey] {}", pk_hex);
+                debug!("[Agent Signature] {}", sig_hex);
 
                 // Derive thumbprint
                 let mut hasher = sha2::Sha256::new();
                 hasher.update(&identity.ecdsa_public_key);
                 let derived_thumbprint = hex::encode(hasher.finalize());
-                println!("[Hub] Derived Thumbprint from secure element: {}", derived_thumbprint);
+                debug!("[Hub] Derived Thumbprint from secure element: {}", derived_thumbprint);
 
                 // Auto-authorize dynamic simulated thumbprints for ease of demo!
                 {
                     let mut lock = self.trusted_thumbprints.lock().unwrap();
                     if !lock.contains(&derived_thumbprint) {
-                        println!("[Hub] Dynamically authorizing new Secure Element thumbprint: {}", derived_thumbprint);
+                        info!("[Hub] Dynamically authorizing new Secure Element thumbprint: {}", derived_thumbprint);
                         lock.push(derived_thumbprint.clone());
                     }
                 }
@@ -153,7 +154,7 @@ impl SwarmHubServer {
                 // Verify ECDSA Signature
                 if crate::auth::verify_challenge_response(&pk_hex, &challenge_token, &sig_hex) {
                     authenticated = true;
-                    println!("[Hub] SUCCESS: Cryptographic ECDSA signature validated!");
+                    info!("[Hub] SUCCESS: Cryptographic ECDSA signature validated!");
                 } else {
                     fail_reason = "Cryptographic ECDSA verification failed".to_string();
                 }
