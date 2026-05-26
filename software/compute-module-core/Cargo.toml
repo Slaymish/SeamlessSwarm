@@ -13,6 +13,7 @@ hex = "0.4"
 rand = "0.8"
 sha2 = "0.10"
 prost = "0.12"
+nng = "1.0"
 
 [build-dependencies]
 prost-build = "0.12"

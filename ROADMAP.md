@@ -28,7 +28,7 @@ This document outlines the phased roadmap and task checklist required to move th
 
 **Goal:** Implement active swarm orchestration with resilient failure isolation mapping to the three-tier task taxonomy.
 
-- [ ] **Dynamic Capability Discovery:** Implement system-level profiling (CPU cores, memory, OS platform, GPU accelerators) in `host-background-agent`'s Scout Engine and stream updates over NNG.
+- [x] **Dynamic Capability Discovery:** Implement system-level profiling (CPU cores, memory, OS platform, GPU accelerators) in `host-background-agent`'s Scout Engine and stream updates over NNG.
 - [x] **Ephemeral Registry indexing:** Optimize the thread-safe `EphemeralRegistry` in `compute-module-core` to dynamically index and expire profiles upon heartbeat timeout.
 - [ ] **Task Taxonomy Scheduling:**
   - **Stateless:** Distribute over parallel worker queues with immediate automated reassignment.
@@ -41,6 +41,6 @@ This document outlines the phased roadmap and task checklist required to move th
 
 **Goal:** Validate entire swarm lifecycle, authentication bounds, and failure modes under stress-test conditions.
 
-- [ ] **E2E Swarm Simulator:** Develop a simulation script to spin up multiple mock host-agents, connect them to a simulated compute-module-core, and assert total capability indexing and scheduling.
+- [x] **E2E Swarm Simulator:** Develop a simulation script to spin up multiple mock host-agents, connect them to a simulated compute-module-core, and assert total capability indexing and scheduling.
 - [ ] **Fault-Injection Test Suite:** Run simulated physical disconnects of workstation nodes during active execution of Stateless, Stateful, and Interactive tasks to verify the automated recovery actions.
 - [ ] **NAN Fallback Verification:** Test local ad-hoc communication fallback using physical proximity frames when access points strip multicast UDP packets.
