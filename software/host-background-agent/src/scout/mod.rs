@@ -151,7 +151,16 @@ mod tests {
         assert!(caps.iter().any(|c| c.resource_name == "accelerator_class"));
         assert!(caps.iter().any(|c| c.resource_name == "memory_tier"));
         assert!(caps.iter().any(|c| c.resource_name == "low_latency_ready"));
-        assert!(caps.iter().any(|c| c.resource_name == "creative_capability_blender"));
-        assert!(caps.iter().any(|c| c.resource_name == "creative_capability_inkscape"));
+
+        // creative_capability_* entries are derived from real discovered apps/tools —
+        // assert the adaptation mechanism fires without pinning specific app names,
+        // since installed software varies per environment.
+        let creative_caps: Vec<_> = caps.iter()
+            .filter(|c| c.resource_name.starts_with("creative_capability_"))
+            .collect();
+        assert!(
+            !creative_caps.is_empty(),
+            "expected at least one creative_capability_* entry from installed apps or CLI tools"
+        );
     }
 }

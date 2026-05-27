@@ -1,9 +1,14 @@
 [package]
-name = "host-background-agent"
+name = "seamless-node"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "seamless-node"
+path = "src/main.rs"
+
 [dependencies]
+compute-module-core = { path = "../compute-module-core" }
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -20,3 +25,7 @@ env_logger = "0.10"
 
 [build-dependencies]
 prost-build = "0.12"
+
+[dev-dependencies]
+prost = "0.12"
+nng = "1.0"

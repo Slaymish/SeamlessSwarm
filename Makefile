@@ -1,25 +1,25 @@
-.PHONY: all build test hub agent provision clean help
+.PHONY: all build test node medium provision clean help
 
 all: build
 
 build:
-	@echo "=== Building all Seamless Swarm workspace components... ==="
+	@echo "=== Building all Seamless System workspace components... ==="
 	cargo build
 
 test:
 	@echo "=== Running all Unit & E2E Integration tests... ==="
 	cargo test
 
-hub:
-	@echo "=== Starting Central Hub / ARM Appliance Simulator... ==="
-	cargo run --package compute-module-core
+node:
+	@echo "=== Starting Seamless Node (Ctrl+C to stop) ==="
+	cargo run --package seamless-node
 
-agent:
-	@echo "=== Starting Host Background Agent (Scout Model Simulation)... ==="
-	cargo run --package host-background-agent
+medium:
+	@echo "=== Starting Swarm Medium Interface (q to quit) ==="
+	cargo run --package swarm-medium
 
 provision:
-	@echo "=== Running Key Provisioning CLI Tool... ==="
+	@echo "=== Key Provisioning CLI ==="
 	cargo run --package provision-keys -- --help
 
 clean:
@@ -28,12 +28,18 @@ clean:
 
 help:
 	@echo "========================================================================="
-	@echo "                      Seamless Swarm - Makefile                          "
+	@echo "                   Seamless System — Makefile                            "
 	@echo "========================================================================="
-	@echo "  make build      : Compile all Rust workspace crates"
-	@echo "  make test       : Execute all unit and E2E integration tests"
-	@echo "  make hub        : Start the Central Hub orchestration service"
-	@echo "  make agent      : Start a local Host Workstation background agent"
-	@echo "  make provision  : Display help/options for the key provisioning CLI"
-	@echo "  make clean      : Clear target build caches"
+	@echo "  make build      : Compile all workspace crates"
+	@echo "  make test       : Run unit and integration tests"
+	@echo "  make node       : Start a node (auto-elects leader or joins as follower)"
+	@echo "  make medium     : Start the interactive Medium CLI (user task interface)"
+	@echo "  make provision  : Key provisioning CLI tool"
+	@echo "  make clean      : Clean build artifacts"
+	@echo "========================================================================="
+	@echo ""
+	@echo "  Demo flow (2+ terminals):"
+	@echo "    Terminal 1: make node   # first node up becomes leader"
+	@echo "    Terminal 2: make node   # subsequent nodes join as followers"
+	@echo "    Terminal 3: make medium # connect the task UI to the current leader"
 	@echo "========================================================================="

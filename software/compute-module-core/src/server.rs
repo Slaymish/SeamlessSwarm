@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use nng::{Socket as NngSocket, Protocol as NngProtocol};
+use nng::options::Options;
 use prost::Message;
 use sha2::Digest;
 use log::{info, error, debug};
@@ -12,74 +13,174 @@ pub struct SwarmHubServer {
     registry: EphemeralRegistry,
     scheduler: ProfileScheduler,
     trusted_thumbprints: Arc<Mutex<Vec<String>>>,
+    // Shared push socket — task sender loop + medium server both use this
+    task_push: Arc<Mutex<Option<NngSocket>>>,
+    // Pub socket — broadcast progress to all medium CLI subscribers
+    progress_pub: Arc<Mutex<Option<NngSocket>>>,
+    bind_ip: String,
 }
 
 impl SwarmHubServer {
-    pub fn new(registry: EphemeralRegistry, scheduler: ProfileScheduler) -> Self {
+    pub fn new(registry: EphemeralRegistry, scheduler: ProfileScheduler, bind_ip: String) -> Self {
         Self {
             registry,
             scheduler,
             trusted_thumbprints: Arc::new(Mutex::new(Vec::new())),
+            task_push: Arc::new(Mutex::new(None)),
+            progress_pub: Arc::new(Mutex::new(None)),
+            bind_ip,
         }
     }
 
     pub fn start_servers(self: Arc<Self>) {
+        let task_addr = format!("tcp://{}:5556", self.bind_ip);
+        let pub_addr  = format!("tcp://{}:5560", self.bind_ip);
+        let auth_addr = format!("tcp://{}:5555", self.bind_ip);
+        let hb_addr   = format!("tcp://{}:5557", self.bind_ip);
+        let med_addr  = format!("tcp://{}:5559", self.bind_ip);
+        let prg_addr  = format!("tcp://{}:5558", self.bind_ip);
+
+        // Create task distribution push socket (agents pull from here)
+        let task_socket = NngSocket::new(NngProtocol::Push0)
+            .expect("[Hub] Failed to create task push socket");
+        task_socket.listen(&task_addr)
+            .expect("[Hub] Failed to listen on task port 5556");
+        *self.task_push.lock().unwrap() = Some(task_socket);
+        info!("[Hub] Task Distribution socket listening on {}", task_addr);
+
+        // Create progress broadcast pub socket (medium CLI subscribes here)
+        let pub_socket = NngSocket::new(NngProtocol::Pub0)
+            .expect("[Hub] Failed to create progress pub socket");
+        pub_socket.listen(&pub_addr)
+            .expect("[Hub] Failed to listen on progress broadcast port 5560");
+        *self.progress_pub.lock().unwrap() = Some(pub_socket);
+        info!("[Hub] Progress broadcast (Pub) socket listening on {}", pub_addr);
+
         let self_auth = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = self_auth.run_auth_server("tcp://127.0.0.1:5555").await {
-                eprintln!("[Hub] Handshake auth server error: {}", e);
+            if let Err(e) = self_auth.run_auth_server(&auth_addr).await {
+                eprintln!("[Hub] Auth server error: {}", e);
             }
         });
 
         let self_heartbeat = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = self_heartbeat.run_heartbeat_server("tcp://127.0.0.1:5557").await {
-                eprintln!("[Hub] Heartbeat receiver server error: {}", e);
+            if let Err(e) = self_heartbeat.run_heartbeat_server(&hb_addr).await {
+                eprintln!("[Hub] Heartbeat receiver error: {}", e);
             }
         });
 
         let self_tasks = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = self_tasks.run_task_sender_loop("tcp://127.0.0.1:5556").await {
+            if let Err(e) = self_tasks.run_task_sender_loop().await {
                 eprintln!("[Hub] Task sender error: {}", e);
+            }
+        });
+
+        let self_medium = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = self_medium.run_medium_server(&med_addr).await {
+                eprintln!("[Hub] Medium interface server error: {}", e);
             }
         });
 
         let self_progress = self.clone();
         std::thread::spawn(move || {
-            if let Err(e) = self_progress.run_progress_receiver_server("tcp://127.0.0.1:5558") {
-                eprintln!("[Hub] Task progress receiver error: {}", e);
+            if let Err(e) = self_progress.run_progress_receiver_server(&prg_addr) {
+                eprintln!("[Hub] Progress receiver error: {}", e);
             }
         });
+    }
+
+    // Encode a task and push it to all connected agents via the shared push socket.
+    fn push_task_frame(&self, task: &SchedulerTask, task_id: &str, node_id: &str) -> bool {
+        let category = match task.task_type {
+            TaskType::StatelessIdempotent => proto::TaskCategory::StatelessIdempotent as i32,
+            TaskType::StatefulLongRunning => proto::TaskCategory::StatefulLongRunning as i32,
+            TaskType::InteractiveLowLatency => proto::TaskCategory::InteractiveLowLatency as i32,
+        };
+
+        let task_def = proto::TaskDefinition {
+            task_id: task_id.to_string(),
+            category,
+            module_target: node_id.to_string(),
+            payload: task.payload.clone(),
+            max_retries: task.max_retries as u32,
+            timeout_ms: 10000,
+            required_capabilities: task.required_capabilities.clone(),
+        };
+
+        let mut encoded = Vec::new();
+        task_def.encode(&mut encoded).unwrap();
+
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&((encoded.len() as u32).to_be_bytes()));
+        frame.push(6); // MsgType 6 = TaskDefinition
+        frame.extend_from_slice(&encoded);
+
+        let lock = self.task_push.lock().unwrap();
+        if let Some(ref socket) = *lock {
+            socket.send(&frame).is_ok()
+        } else {
+            false
+        }
+    }
+
+    // Run dispatch for all pending tasks against the current node registry.
+    fn dispatch_now(&self) {
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let dispatches = self.scheduler.dispatch_pending_tasks(current_time);
+        for (task_id, node_id) in dispatches {
+            if let Some(task) = self.scheduler.get_task(&task_id) {
+                let caps = task.required_capabilities.join(", ");
+                if caps.is_empty() {
+                    info!("[Hub] Dispatching {} → node {}", task_id, node_id);
+                } else {
+                    info!("[Hub] Dispatching {} → node {} (requires: {})", task_id, node_id, caps);
+                }
+                if self.push_task_frame(&task, &task_id, &node_id) {
+                    info!("[Hub] Task {} sent successfully.", task_id);
+                } else {
+                    error!("[Hub] Failed to push task {}.", task_id);
+                }
+            }
+        }
     }
 
     // 1. Handshake Authentication Server (Req/Rep)
     async fn run_auth_server(&self, endpoint: &str) -> Result<(), String> {
         let server_socket = NngSocket::new(NngProtocol::Rep0).map_err(|e| e.to_string())?;
+        server_socket.set_opt::<nng::options::RecvTimeout>(Some(Duration::from_millis(500)))
+            .map_err(|e: nng::Error| e.to_string())?;
         server_socket.listen(endpoint).map_err(|e| e.to_string())?;
-        info!("[Hub] Secure Cryptographic Handshake server listening on {}", endpoint);
+        info!("[Hub] Auth server listening on {}", endpoint);
 
         loop {
-            // Receive Join request
-            let msg = server_socket.recv().map_err(|e| e.to_string())?;
+            let msg = match server_socket.recv() {
+                Ok(m) => m,
+                Err(nng::Error::TimedOut) => continue,
+                Err(e) => return Err(e.to_string()),
+            };
+
             let slice = msg.as_slice();
-            if slice.len() < 5 {
-                continue;
-            }
+            if slice.len() < 5 { continue; }
             let _payload_len = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
             let msg_type = slice[4];
             if msg_type != 1 {
-                error!("[Hub] Authentication Error: Expected Join initiation (1), received {}", msg_type);
+                error!("[Hub] Auth: expected Join (1), got {}", msg_type);
                 continue;
             }
 
             let node_id = String::from_utf8_lossy(&slice[5..]);
-            info!("[Hub] Handshake Request initiated by Workstation: {}", node_id);
+            info!("[Hub] Handshake initiated by: {}", node_id);
 
-            // Generate high-entropy 32-byte challenge token
             let mut challenge_token = vec![0u8; 32];
             rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut challenge_token);
-            debug!("[Hub] Generated high-entropy challenge: {}", hex::encode(&challenge_token));
+            debug!("[Hub] Challenge token: {}", hex::encode(&challenge_token));
 
             let challenge = proto::HandshakeChallenge {
                 high_entropy_token: challenge_token.clone(),
@@ -91,38 +192,26 @@ impl SwarmHubServer {
 
             let mut encoded_challenge = Vec::new();
             challenge.encode(&mut encoded_challenge).unwrap();
-
-            // Frame and send challenge
             let mut challenge_frame = Vec::new();
             challenge_frame.extend_from_slice(&((encoded_challenge.len() as u32).to_be_bytes()));
             challenge_frame.push(2); // MsgType 2 = HandshakeChallenge
             challenge_frame.extend_from_slice(&encoded_challenge);
-
-            debug!("[Hub] Sending challenge frame to node...");
             server_socket.send(&challenge_frame).map_err(|(_, e)| e.to_string())?;
 
-            // Receive HandshakeResponse
             let resp_msg = server_socket.recv().map_err(|e| e.to_string())?;
             let resp_slice = resp_msg.as_slice();
-            if resp_slice.len() < 5 {
-                continue;
-            }
+            if resp_slice.len() < 5 { continue; }
             let resp_len = u32::from_be_bytes([resp_slice[0], resp_slice[1], resp_slice[2], resp_slice[3]]) as usize;
-            let resp_msg_type = resp_slice[4];
-            if resp_msg_type != 3 {
-                error!("[Hub] Authentication Error: Expected Response frame (3), got {}", resp_msg_type);
+            if resp_slice[4] != 3 {
+                error!("[Hub] Auth: expected Response (3), got {}", resp_slice[4]);
                 continue;
             }
 
             let response = match proto::HandshakeResponse::decode(&resp_slice[5..5 + resp_len]) {
                 Ok(r) => r,
-                Err(e) => {
-                    error!("[Hub] Failed to decode response payload: {}", e);
-                    continue;
-                }
+                Err(e) => { error!("[Hub] Failed to decode HandshakeResponse: {}", e); continue; }
             };
 
-            // Verify Challenge
             let mut authenticated = false;
             let mut fail_reason = String::new();
             let mut verified_node_id = String::new();
@@ -131,41 +220,35 @@ impl SwarmHubServer {
                 verified_node_id = identity.node_uuid.clone();
                 let pk_hex = hex::encode(&identity.ecdsa_public_key);
                 let sig_hex = hex::encode(&response.signature);
+                info!("[Hub] Verifying ECDSA signature from: {}", verified_node_id);
+                debug!("[PubKey] {}", pk_hex);
+                debug!("[Signature] {}", sig_hex);
 
-                info!("[Hub] Verifying cryptographic ECDSA signature from node: {}", verified_node_id);
-                debug!("[Agent PubKey] {}", pk_hex);
-                debug!("[Agent Signature] {}", sig_hex);
-
-                // Derive thumbprint
                 let mut hasher = sha2::Sha256::new();
                 hasher.update(&identity.ecdsa_public_key);
                 let derived_thumbprint = hex::encode(hasher.finalize());
-                debug!("[Hub] Derived Thumbprint from secure element: {}", derived_thumbprint);
 
-                // Auto-authorize dynamic simulated thumbprints for ease of demo!
                 {
                     let mut lock = self.trusted_thumbprints.lock().unwrap();
                     if !lock.contains(&derived_thumbprint) {
-                        info!("[Hub] Dynamically authorizing new Secure Element thumbprint: {}", derived_thumbprint);
+                        info!("[Hub] Authorizing new thumbprint: {}", derived_thumbprint);
                         lock.push(derived_thumbprint.clone());
                     }
                 }
 
-                // Verify ECDSA Signature
                 if crate::auth::verify_challenge_response(&pk_hex, &challenge_token, &sig_hex) {
                     authenticated = true;
-                    info!("[Hub] SUCCESS: Cryptographic ECDSA signature validated!");
+                    info!("[Hub] ECDSA verification passed.");
                 } else {
-                    fail_reason = "Cryptographic ECDSA verification failed".to_string();
+                    fail_reason = "ECDSA verification failed".to_string();
                 }
             } else {
                 fail_reason = "Missing identity block".to_string();
             }
 
-            // Construct and send HandshakeResult
             let result = proto::HandshakeResult {
                 authenticated,
-                session_token: if authenticated { uuid::Uuid::new_v4().to_string() } else { "".to_string() },
+                session_token: if authenticated { uuid::Uuid::new_v4().to_string() } else { String::new() },
                 message: if authenticated {
                     format!("Welcome {}, swarm authentication granted!", verified_node_id)
                 } else {
@@ -175,46 +258,42 @@ impl SwarmHubServer {
 
             let mut encoded_result = Vec::new();
             result.encode(&mut encoded_result).unwrap();
-
             let mut result_frame = Vec::new();
             result_frame.extend_from_slice(&((encoded_result.len() as u32).to_be_bytes()));
             result_frame.push(4); // MsgType 4 = HandshakeResult
             result_frame.extend_from_slice(&encoded_result);
-
-            println!("[Hub] Sending HandshakeResult frame...");
             server_socket.send(&result_frame).map_err(|(_, e)| e.to_string())?;
         }
     }
 
-    // 2. Heartbeat Receiver Server (Pull)
+    // 2. Heartbeat / Capability Receiver (Pull)
     async fn run_heartbeat_server(&self, endpoint: &str) -> Result<(), String> {
         let server_socket = NngSocket::new(NngProtocol::Pull0).map_err(|e| e.to_string())?;
+        server_socket.set_opt::<nng::options::RecvTimeout>(Some(Duration::from_millis(500)))
+            .map_err(|e: nng::Error| e.to_string())?;
         server_socket.listen(endpoint).map_err(|e| e.to_string())?;
-        println!("[Hub] Heartbeat Capability Receiver listening on {}", endpoint);
+        info!("[Hub] Heartbeat receiver listening on {}", endpoint);
 
         loop {
-            let msg = server_socket.recv().map_err(|e| e.to_string())?;
-            let slice = msg.as_slice();
-            if slice.len() < 5 {
-                continue;
-            }
-            let payload_len = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
-            let msg_type = slice[4];
-            if msg_type != 5 {
-                continue;
-            }
-
-            let profile = match proto::CapabilityProfile::decode(&slice[5..5+payload_len]) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("[Hub] Failed to decode CapabilityProfile: {}", e);
-                    continue;
-                }
+            let msg = match server_socket.recv() {
+                Ok(m) => m,
+                Err(nng::Error::TimedOut) => continue,
+                Err(e) => return Err(e.to_string()),
             };
 
-            println!("\n[Hub] <<< RECEIVED CAPABILITY PROFILE from {}", profile.node_id);
-            println!("[Hub] Node OS: {}", profile.os_platform);
-            
+            let slice = msg.as_slice();
+            if slice.len() < 5 { continue; }
+            let payload_len = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
+            if slice[4] != 5 { continue; } // MsgType 5 = CapabilityProfile
+
+            let profile = match proto::CapabilityProfile::decode(&slice[5..5 + payload_len]) {
+                Ok(p) => p,
+                Err(e) => { eprintln!("[Hub] Failed to decode CapabilityProfile: {}", e); continue; }
+            };
+
+            info!("\n[Hub] <<< CAPABILITY PROFILE from {}", profile.node_id);
+            info!("[Hub] OS: {}", profile.os_platform);
+
             let mut core_caps = Vec::new();
             for cap in &profile.capabilities {
                 let val_str = match &cap.resource_value {
@@ -222,168 +301,234 @@ impl SwarmHubServer {
                     Some(proto::device_capability::ResourceValue::IntVal(i)) => i.to_string(),
                     Some(proto::device_capability::ResourceValue::DoubleVal(d)) => d.to_string(),
                     Some(proto::device_capability::ResourceValue::StringVal(s)) => s.clone(),
-                    None => "".to_string(),
+                    None => String::new(),
                 };
-                println!("  - {}: {} ({})", cap.resource_name, val_str, cap.value_type);
-
-                core_caps.push(Capability {
-                    name: cap.resource_name.clone(),
-                    val_type: cap.value_type.clone(),
-                    value: val_str,
-                });
+                info!("  - {}: {} ({})", cap.resource_name, val_str, cap.value_type);
+                core_caps.push(Capability { name: cap.resource_name.clone(), val_type: cap.value_type.clone(), value: val_str });
             }
 
-            // Register into our Ephemeral Registry
-            let node = NodeProfile {
+            self.registry.register_node(NodeProfile {
                 node_id: profile.node_id.clone(),
                 os_platform: profile.os_platform.clone(),
                 capabilities: core_caps,
-                last_seen: 1200, // Represent high quality node heartbeat
-                public_key: "".to_string(),
-            };
-            self.registry.register_node(node);
-            println!("[Hub] Node {} successfully registered in ephemeral registry database.", profile.node_id);
+                last_seen: 1200,
+                public_key: String::new(),
+            });
+            info!("[Hub] Node {} registered.", profile.node_id);
         }
     }
 
-    // 3. Task Distribution Loop (Push)
-    async fn run_task_sender_loop(&self, endpoint: &str) -> Result<(), String> {
-        let task_socket = NngSocket::new(NngProtocol::Push0).map_err(|e| e.to_string())?;
-        task_socket.listen(endpoint).map_err(|e| e.to_string())?;
-        println!("[Hub] Task Distribution server listening on {}", endpoint);
-
-        // Keep pushing tasks periodically for testing / demo purposes!
-        let mut task_counter = 1;
+    // 3. Task Dispatch Loop — uses shared push socket
+    async fn run_task_sender_loop(&self) -> Result<(), String> {
+        let mut task_counter = 1u32;
         loop {
-            tokio::time::sleep(Duration::from_secs(8)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
 
-            let nodes = self.registry.list_nodes();
-            if nodes.is_empty() {
+            if self.registry.list_nodes().is_empty() {
                 continue;
             }
 
-            println!("\n[Hub] === SCHEDULER DISPATCH INITIATED ===");
-            println!("[Hub] Running profile-driven task matching...");
+            info!("\n[Hub] === SCHEDULER DISPATCH ===");
 
-            // If no pending tasks, submit a couple of demonstration tasks to the scheduler queue
             let pending_count = self.scheduler.list_tasks().iter()
                 .filter(|t| t.state == TaskState::Pending)
                 .count();
-            
+
+            // Only auto-generate demo tasks when no user-submitted tasks are waiting
             if pending_count == 0 {
-                // Alternate capability requirements each round to exercise routing
-                let (stateless_cap, stateful_cap) = if task_counter % 2 == 1 {
+                let (cap_a, cap_b) = if task_counter % 2 == 1 {
                     ("ffmpeg_execution", "blender_execution")
                 } else {
                     ("blender_execution", "ffmpeg_execution")
                 };
 
-                let task_stateless = SchedulerTask::new(
-                    format!("task-{:03}-stateless", task_counter),
-                    TaskType::StatelessIdempotent,
-                    vec![100, 101, 102],
-                    3,
-                ).with_capabilities(vec![stateless_cap.to_string()]);
-
-                let task_stateful = SchedulerTask::new(
-                    format!("task-{:03}-stateful", task_counter),
-                    TaskType::StatefulLongRunning,
-                    vec![200, 201, 202],
-                    3,
-                ).with_capabilities(vec![stateful_cap.to_string()]);
-
-                self.scheduler.submit_task(task_stateless);
-                self.scheduler.submit_task(task_stateful);
+                self.scheduler.submit_task(
+                    SchedulerTask::new(
+                        format!("auto-{:03}-stateless", task_counter),
+                        TaskType::StatelessIdempotent,
+                        vec![100, 101, 102],
+                        3,
+                    ).with_capabilities(vec![cap_a.to_string()])
+                );
+                self.scheduler.submit_task(
+                    SchedulerTask::new(
+                        format!("auto-{:03}-stateful", task_counter),
+                        TaskType::StatefulLongRunning,
+                        vec![200, 201, 202],
+                        3,
+                    ).with_capabilities(vec![cap_b.to_string()])
+                );
                 task_counter += 1;
             }
 
-            let current_time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            self.dispatch_now();
+        }
+    }
 
-            // Dispatch pending tasks
-            let dispatches = self.scheduler.dispatch_pending_tasks(current_time);
-            for (task_id, node_id) in dispatches {
-                if let Some(task) = self.scheduler.get_task(&task_id) {
-                    if task.required_capabilities.is_empty() {
-                        println!("[Hub] Dispatching task {} to node {}...", task_id, node_id);
-                    } else {
-                        println!("[Hub] Dispatching task {} to node {} (requires: {})...",
-                            task_id, node_id, task.required_capabilities.join(", "));
-                    }
+    // 4. Medium Interface Server (Req/Rep) — NEW port 5559
+    async fn run_medium_server(&self, endpoint: &str) -> Result<(), String> {
+        let server_socket = NngSocket::new(NngProtocol::Rep0).map_err(|e| e.to_string())?;
+        server_socket.set_opt::<nng::options::RecvTimeout>(Some(Duration::from_millis(500)))
+            .map_err(|e: nng::Error| e.to_string())?;
+        server_socket.listen(endpoint).map_err(|e| e.to_string())?;
+        info!("[Hub] Medium interface server listening on {}", endpoint);
 
-                    let category = match task.task_type {
-                        TaskType::StatelessIdempotent => proto::TaskCategory::StatelessIdempotent as i32,
-                        TaskType::StatefulLongRunning => proto::TaskCategory::StatefulLongRunning as i32,
-                        TaskType::InteractiveLowLatency => proto::TaskCategory::InteractiveLowLatency as i32,
+        loop {
+            let msg = match server_socket.recv() {
+                Ok(m) => m,
+                Err(nng::Error::TimedOut) => continue,
+                Err(e) => return Err(e.to_string()),
+            };
+
+            let slice = msg.as_slice();
+            if slice.len() < 5 {
+                let _ = server_socket.send(&[0u8; 5][..]);
+                continue;
+            }
+
+            let payload_len = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
+            let msg_type = slice[4];
+
+            match msg_type {
+                10 => {
+                    // SwarmStatusRequest
+                    let req = match proto::SwarmStatusRequest::decode(&slice[5..5 + payload_len]) {
+                        Ok(r) => r,
+                        Err(_) => { let _ = server_socket.send(&[0u8; 5][..]); continue; }
                     };
 
-                    let task_def = proto::TaskDefinition {
-                        task_id,
-                        category,
-                        module_target: node_id,
-                        payload: task.payload.clone(),
-                        max_retries: task.max_retries as u32,
-                        timeout_ms: 10000,
-                        required_capabilities: task.required_capabilities.clone(),
+                    let authorized = !req.access_key.is_empty();
+                    let nodes = self.registry.list_nodes();
+                    let mut caps: Vec<String> = nodes.iter()
+                        .flat_map(|n| n.capabilities.iter().map(|c| c.name.clone()))
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    caps.sort();
+
+                    info!("[Hub] Medium status request — access_key='{}', nodes={}, authorized={}",
+                        req.access_key, nodes.len(), authorized);
+
+                    let response = proto::SwarmStatusResponse {
+                        authorized,
+                        node_count: nodes.len() as i32,
+                        available_capabilities: caps,
+                        message: if authorized { "Access granted".to_string() } else { "Invalid access key".to_string() },
+                    };
+                    let mut buf = Vec::new();
+                    response.encode(&mut buf).unwrap();
+                    let mut frame = Vec::new();
+                    frame.extend_from_slice(&((buf.len() as u32).to_be_bytes()));
+                    frame.push(11); // SwarmStatusResponse
+                    frame.extend_from_slice(&buf);
+                    let _ = server_socket.send(&frame);
+                }
+                12 => {
+                    // TaskSubmitRequest
+                    let req = match proto::TaskSubmitRequest::decode(&slice[5..5 + payload_len]) {
+                        Ok(r) => r,
+                        Err(_) => { let _ = server_socket.send(&[0u8; 5][..]); continue; }
                     };
 
-                    let mut encoded_task = Vec::new();
-                    task_def.encode(&mut encoded_task).unwrap();
-
-                    let mut task_frame = Vec::new();
-                    task_frame.extend_from_slice(&((encoded_task.len() as u32).to_be_bytes()));
-                    task_frame.push(6); // MsgType 6 = TaskDefinition
-                    task_frame.extend_from_slice(&encoded_task);
-
-                    if let Err(e) = task_socket.send(&task_frame) {
-                        eprintln!("[Hub] Failed to push task definition: {:?}", e);
-                    } else {
-                        println!("[Hub] Task definition sent successfully!");
+                    if req.access_key.is_empty() {
+                        let response = proto::TaskSubmitResponse {
+                            accepted: false,
+                            task_id: String::new(),
+                            message: "Invalid access key".to_string(),
+                        };
+                        let mut buf = Vec::new();
+                        response.encode(&mut buf).unwrap();
+                        let mut frame = Vec::new();
+                        frame.extend_from_slice(&((buf.len() as u32).to_be_bytes()));
+                        frame.push(13);
+                        frame.extend_from_slice(&buf);
+                        let _ = server_socket.send(&frame);
+                        continue;
                     }
+
+                    let task_id = format!("medium-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                    info!("[Hub] Medium CLI submitted task: {} (\"{}\")", task_id, req.task_name);
+
+                    let task = SchedulerTask::new(
+                        task_id.clone(),
+                        match req.category {
+                            1 => TaskType::StatefulLongRunning,
+                            2 => TaskType::InteractiveLowLatency,
+                            _ => TaskType::StatelessIdempotent,
+                        },
+                        req.payload,
+                        3,
+                    ).with_capabilities(req.required_capabilities);
+
+                    self.scheduler.submit_task(task);
+                    // Immediately try to dispatch — don't wait for the 2s loop
+                    self.dispatch_now();
+
+                    let response = proto::TaskSubmitResponse {
+                        accepted: true,
+                        task_id: task_id.clone(),
+                        message: "Task queued for dispatch to swarm".to_string(),
+                    };
+                    let mut buf = Vec::new();
+                    response.encode(&mut buf).unwrap();
+                    let mut frame = Vec::new();
+                    frame.extend_from_slice(&((buf.len() as u32).to_be_bytes()));
+                    frame.push(13); // TaskSubmitResponse
+                    frame.extend_from_slice(&buf);
+                    let _ = server_socket.send(&frame);
+                }
+                _ => {
+                    // Unknown — send empty ack so the client's Req socket isn't stuck
+                    let _ = server_socket.send(&[0u8; 5][..]);
                 }
             }
         }
     }
 
-    // 4. Task Progress Receiver Server (Pull)
+    // 5. Task Progress Receiver (Pull) — also broadcasts on progress_pub
     pub fn run_progress_receiver_server(&self, endpoint: &str) -> Result<(), String> {
         let server_socket = NngSocket::new(NngProtocol::Pull0).map_err(|e| e.to_string())?;
+        server_socket.set_opt::<nng::options::RecvTimeout>(Some(Duration::from_millis(500)))
+            .map_err(|e: nng::Error| e.to_string())?;
         server_socket.listen(endpoint).map_err(|e| e.to_string())?;
-        println!("[Hub] Task Progress Receiver listening on {}", endpoint);
+        info!("[Hub] Task progress receiver listening on {}", endpoint);
 
         loop {
-            let msg = server_socket.recv().map_err(|e| e.to_string())?;
-            let slice = msg.as_slice();
-            if slice.len() < 5 {
-                continue;
-            }
-            let payload_len = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
-            let msg_type = slice[4];
-            if msg_type != 7 {
-                continue;
-            }
-
-            let progress = match proto::TaskProgress::decode(&slice[5..5+payload_len]) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("[Hub] Failed to decode TaskProgress: {}", e);
-                    continue;
-                }
+            let msg = match server_socket.recv() {
+                Ok(m) => m,
+                Err(nng::Error::TimedOut) => continue,
+                Err(e) => return Err(e.to_string()),
             };
 
-            println!("\n[Hub] <<< TASK PROGRESS UPDATE: {} - Status: {:?}, {:.1}%", 
-                progress.task_id, 
-                progress.status,
-                progress.progress_percentage
-            );
+            let slice = msg.as_slice();
+            if slice.len() < 5 { continue; }
+            let payload_len = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
+            if slice[4] != 7 { continue; } // MsgType 7 = TaskProgress
 
-            // Update in scheduler
+            // Save raw frame bytes for broadcasting before we borrow for decode
+            let frame_bytes = slice.to_vec();
+
+            let progress = match proto::TaskProgress::decode(&slice[5..5 + payload_len]) {
+                Ok(p) => p,
+                Err(e) => { error!("[Hub] Failed to decode TaskProgress: {}", e); continue; }
+            };
+
+            info!("\n[Hub] <<< TASK PROGRESS: {} — status={:?} {:.1}%",
+                progress.task_id, progress.status, progress.progress_percentage);
+
+            // Broadcast raw frame to all medium CLI subscribers
+            {
+                let lock = self.progress_pub.lock().unwrap();
+                if let Some(ref pub_socket) = *lock {
+                    let _ = pub_socket.send(&frame_bytes);
+                }
+            }
+
+            // Update scheduler state
             let result = if progress.status == proto::TaskStatus::Completed as i32 {
                 ExecutionResult::Success
             } else if !progress.checkpoint_data.is_empty() {
-                println!("[Hub] ---> Stateful Checkpoint Data Saved for task {}: Size {}B", progress.task_id, progress.checkpoint_data.len());
+                info!("[Hub] Checkpoint saved for {}: {}B", progress.task_id, progress.checkpoint_data.len());
                 ExecutionResult::CheckpointSaved(progress.checkpoint_data)
             } else {
                 continue;

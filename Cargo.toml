@@ -2,6 +2,7 @@
 members = [
     "software/compute-module-core",
     "software/host-background-agent",
-    "tools/provision-keys"
+    "tools/provision-keys",
+    "tools/swarm-medium"
 ]
 resolver = "2"

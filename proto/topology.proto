@@ -72,3 +72,40 @@ message TaskProgress {
   bytes checkpoint_data = 4;
   string error_message = 5;
 }
+
+// MsgType 10 — sent by medium CLI to request swarm status
+message SwarmStatusRequest {
+  string access_key = 1;
+}
+
+// MsgType 11 — hub reply with current swarm state
+message SwarmStatusResponse {
+  bool authorized = 1;
+  int32 node_count = 2;
+  repeated string available_capabilities = 3;
+  string message = 4;
+}
+
+// MsgType 12 — sent by medium CLI to submit a task
+message TaskSubmitRequest {
+  string access_key = 1;
+  string task_name = 2;
+  int32 category = 3;
+  repeated string required_capabilities = 4;
+  bytes payload = 5;
+}
+
+// MsgType 13 — hub reply with task acceptance result
+message TaskSubmitResponse {
+  bool accepted = 1;
+  string task_id = 2;
+  string message = 3;
+}
+
+// MsgType 20 — broadcast by every live node over mDNS to announce presence and role
+message PeerAnnounce {
+  string node_id = 1;
+  bool is_leader = 2;
+  string leader_tcp_base = 3;  // IP of the hub (e.g. "192.168.1.100") — set only when is_leader = true
+  uint64 timestamp = 4;
+}

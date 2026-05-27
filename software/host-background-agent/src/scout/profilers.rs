@@ -209,6 +209,51 @@ impl Profiler for NetworkProfiler {
     }
 }
 
+// Known creative/compute CLI tools to probe on all platforms.
+// Maps (executable_name, capability_name) — the capability name becomes the `installed_app_*` key.
+const KNOWN_CLI_TOOLS: &[(&str, &str)] = &[
+    ("ffmpeg",       "ffmpeg"),
+    ("blender",      "blender"),
+    ("inkscape",     "inkscape"),
+    ("HandBrakeCLI", "handbrake"),
+    ("gimp",         "gimp"),
+    ("convert",      "imagemagick"),
+    ("python3",      "python3"),
+    ("node",         "node"),
+    ("docker",       "docker"),
+    ("claude",       "claude"),
+];
+
+fn discover_cli_tools() -> Vec<String> {
+    let path_env = std::env::var("PATH").unwrap_or_default();
+
+    let mut search_dirs: Vec<std::path::PathBuf> = path_env
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect();
+
+    // Prepend Homebrew paths (Apple Silicon first, then Intel) so they are found
+    // even when the agent process was not launched from a login shell.
+    for dir in &["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/local/sbin"] {
+        let p = std::path::PathBuf::from(dir);
+        if p.exists() && !search_dirs.contains(&p) {
+            search_dirs.insert(0, p);
+        }
+    }
+
+    let mut found = Vec::new();
+    for (exe, name) in KNOWN_CLI_TOOLS {
+        for dir in &search_dirs {
+            if dir.join(exe).exists() {
+                found.push(name.to_string());
+                break;
+            }
+        }
+    }
+    found
+}
+
 // 5. Software Application Profiler (Organic Software Discovery)
 pub struct SoftwareProfiler;
 
@@ -220,17 +265,15 @@ impl Profiler for SoftwareProfiler {
             let is_windows = cfg!(target_os = "windows");
 
             if is_macos {
+                // GUI app bundles from /Applications
                 if let Ok(entries) = std::fs::read_dir("/Applications") {
                     for entry in entries.flatten() {
                         let path = entry.path();
-                        if let Some(ext) = path.extension() {
-                            if ext == "app" {
-                                if let Some(name) = path.file_stem() {
-                                    let app_name = name.to_string_lossy().to_lowercase()
-                                        .replace(" ", "_")
-                                        .replace(".app", "");
-                                    apps.push(app_name);
-                                }
+                        if path.extension().map_or(false, |e| e == "app") {
+                            if let Some(name) = path.file_stem() {
+                                let app_name = name.to_string_lossy().to_lowercase()
+                                    .replace(' ', "_");
+                                apps.push(app_name);
                             }
                         }
                     }
@@ -241,42 +284,35 @@ impl Profiler for SoftwareProfiler {
                         let path = entry.path();
                         if path.is_dir() {
                             if let Some(name) = path.file_name() {
-                                let app_name = name.to_string_lossy().to_lowercase().replace(" ", "_");
-                                apps.push(app_name);
+                                apps.push(name.to_string_lossy().to_lowercase().replace(' ', "_"));
                             }
                         }
                     }
                 }
             } else {
-                // Linux: Scan /usr/share/applications for .desktop files
                 if let Ok(entries) = std::fs::read_dir("/usr/share/applications") {
                     for entry in entries.flatten() {
                         let path = entry.path();
-                        if let Some(ext) = path.extension() {
-                            if ext == "desktop" {
-                                if let Some(name) = path.file_stem() {
-                                    let app_name = name.to_string_lossy().to_lowercase().replace(" ", "_");
-                                    apps.push(app_name);
-                                }
+                        if path.extension().map_or(false, |e| e == "desktop") {
+                            if let Some(name) = path.file_stem() {
+                                apps.push(name.to_string_lossy().to_lowercase().replace(' ', "_"));
                             }
                         }
                     }
                 }
             }
 
-            // Always ensure we have some base creative simulation apps (Blender, Inkscape, FFmpeg)
-            // to guarantee a beautiful demo and backward-compatible tests in all environments!
-            for simulated_app in &["blender", "inkscape", "ffmpeg", "handbrake"] {
-                let app_str = simulated_app.to_string();
-                if !apps.contains(&app_str) {
-                    apps.push(app_str);
+            // Merge in CLI tools discovered from PATH / Homebrew — no fabrication.
+            for name in discover_cli_tools() {
+                if !apps.contains(&name) {
+                    apps.push(name);
                 }
             }
 
             apps
         })
         .await
-        .unwrap_or_else(|_| vec!["blender".to_string(), "inkscape".to_string(), "ffmpeg".to_string()]);
+        .unwrap_or_default();
 
         let mut caps = Vec::new();
         for app in discovered_apps {
