@@ -71,6 +71,7 @@ message TaskProgress {
   float progress_percentage = 3;
   bytes checkpoint_data = 4;
   string error_message = 5;
+  string result_text = 6;  // text output returned to medium on completion (e.g. LLM response)
 }
 
 // MsgType 10 — sent by medium CLI to request swarm status

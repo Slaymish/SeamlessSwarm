@@ -398,29 +398,121 @@ async fn execute_task(task: proto::TaskDefinition, node_id: &str, progress_socke
 
     if !all_capable {
         warn!("[Worker {}] Task {} REJECTED — capability unmet.", node_id, task.task_id);
-        send_progress(progress_socket, &task.task_id, proto::TaskStatus::Failed, 0.0, vec![],
-            "capability requirements unmet on this node".to_string());
+        send_progress(progress_socket, &task.task_id, proto::TaskStatus::Failed, 0.0, vec![], "capability requirements unmet on this node".to_string(), String::new());
         return;
     }
 
-    // Stage 1 — 33%
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    let checkpoint = if task.category == proto::TaskCategory::StatefulLongRunning as i32 {
-        vec![88, 99, 111, 222]
-    } else {
-        vec![]
-    };
-    send_progress(progress_socket, &task.task_id, proto::TaskStatus::Running, 33.3, checkpoint, String::new());
+    // Dispatch to the right executor based on the required capability
+    let cap = task.required_capabilities.first().map(String::as_str).unwrap_or("");
+    match cap {
+        "ollama_execution" => {
+            execute_ollama_task(&task, node_id, progress_socket).await;
+        }
+        _ => {
+            // Generic simulated task (stateless / stateful stages)
+            send_progress(progress_socket, &task.task_id, proto::TaskStatus::Running, 33.3,
+                if task.category == proto::TaskCategory::StatefulLongRunning as i32 { vec![88, 99, 111, 222] } else { vec![] },
+                String::new(), String::new());
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            send_progress(progress_socket, &task.task_id, proto::TaskStatus::Running, 66.6, vec![], String::new(), String::new());
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            send_progress(progress_socket, &task.task_id, proto::TaskStatus::Completed, 100.0, vec![], String::new(), String::new());
+            info!("[Worker {}] Task {} completed.", node_id, task.task_id);
+        }
+    }
+}
 
-    // Stage 2 — 66%
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    send_progress(progress_socket, &task.task_id, proto::TaskStatus::Running, 66.6, vec![], String::new());
+async fn execute_ollama_task(task: &proto::TaskDefinition, node_id: &str, progress_socket: &NngSocket) {
+    let prompt = String::from_utf8_lossy(&task.payload).to_string();
+    if prompt.trim().is_empty() {
+        send_progress(progress_socket, &task.task_id, proto::TaskStatus::Failed, 0.0, vec![], "empty prompt".to_string(), String::new());
+        return;
+    }
 
-    // Stage 3 — 100%
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    send_progress(progress_socket, &task.task_id, proto::TaskStatus::Completed, 100.0, vec![], String::new());
+    info!("[Worker {}] Ollama task — prompt: {}", node_id, &prompt[..prompt.len().min(80)]);
+    send_progress(progress_socket, &task.task_id, proto::TaskStatus::Running, 10.0, vec![], String::new(), String::new());
 
-    info!("[Worker {}] Task {} completed.", node_id, task.task_id);
+    let prompt_clone = prompt.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let model = first_ollama_model().unwrap_or_else(|| "llama3.2:1b".to_string());
+        info!("Running ollama model: {}", model);
+        run_ollama(&model, &prompt_clone)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(response)) => {
+            info!("[Worker {}] Ollama response ({} chars)", node_id, response.len());
+            send_progress(progress_socket, &task.task_id, proto::TaskStatus::Completed, 100.0, vec![], String::new(), response);
+        }
+        Ok(Err(e)) => {
+            error!("[Worker {}] Ollama error: {}", node_id, e);
+            send_progress(progress_socket, &task.task_id, proto::TaskStatus::Failed, 0.0, vec![], e, String::new());
+        }
+        Err(e) => {
+            error!("[Worker {}] spawn_blocking panic: {}", node_id, e);
+            send_progress(progress_socket, &task.task_id, proto::TaskStatus::Failed, 0.0, vec![], "internal error".to_string(), String::new());
+        }
+    }
+}
+
+fn enriched_path() -> String {
+    let base = std::env::var("PATH").unwrap_or_default();
+    format!("/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:{}", base)
+}
+
+fn first_ollama_model() -> Option<String> {
+    let output = Command::new("ollama")
+        .args(["list"])
+        .env("PATH", enriched_path())
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Output format: "NAME    ID    SIZE    MODIFIED" header then one model per line
+    stdout.lines()
+        .skip(1)
+        .find_map(|line| {
+            let name = line.split_whitespace().next()?;
+            if name.is_empty() { None } else { Some(name.to_string()) }
+        })
+}
+
+fn run_ollama(model: &str, prompt: &str) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new("ollama")
+        .args(["run", model])
+        .env("PATH", enriched_path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start ollama: {}", e))?;
+
+    // Write prompt to stdin in a separate thread to avoid deadlock on large outputs
+    let prompt_bytes = prompt.as_bytes().to_vec();
+    if let Some(mut stdin) = child.stdin.take() {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&prompt_bytes);
+            // stdin drops here, sending EOF to ollama
+        });
+    }
+
+    let output = child.wait_with_output()
+        .map_err(|e| format!("Ollama wait failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("ollama exited with status {}", output.status)
+        } else {
+            stderr
+        });
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn send_progress(
@@ -430,6 +522,7 @@ fn send_progress(
     pct: f32,
     checkpoint: Vec<u8>,
     err: String,
+    result_text: String,
 ) {
     let msg = proto::TaskProgress {
         task_id: task_id.to_string(),
@@ -437,6 +530,7 @@ fn send_progress(
         progress_percentage: pct,
         checkpoint_data: checkpoint,
         error_message: err,
+        result_text,
     };
     let mut buf = Vec::new();
     msg.encode(&mut buf).unwrap();

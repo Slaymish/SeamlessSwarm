@@ -222,6 +222,7 @@ const KNOWN_CLI_TOOLS: &[(&str, &str)] = &[
     ("node",         "node"),
     ("docker",       "docker"),
     ("claude",       "claude"),
+    ("ollama",       "ollama"),
 ];
 
 fn discover_cli_tools() -> Vec<String> {

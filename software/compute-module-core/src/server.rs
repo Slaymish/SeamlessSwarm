@@ -320,7 +320,6 @@ impl SwarmHubServer {
 
     // 3. Task Dispatch Loop — uses shared push socket
     async fn run_task_sender_loop(&self) -> Result<(), String> {
-        let mut task_counter = 1u32;
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -328,40 +327,14 @@ impl SwarmHubServer {
                 continue;
             }
 
-            info!("\n[Hub] === SCHEDULER DISPATCH ===");
-
             let pending_count = self.scheduler.list_tasks().iter()
                 .filter(|t| t.state == TaskState::Pending)
                 .count();
 
-            // Only auto-generate demo tasks when no user-submitted tasks are waiting
-            if pending_count == 0 {
-                let (cap_a, cap_b) = if task_counter % 2 == 1 {
-                    ("ffmpeg_execution", "blender_execution")
-                } else {
-                    ("blender_execution", "ffmpeg_execution")
-                };
-
-                self.scheduler.submit_task(
-                    SchedulerTask::new(
-                        format!("auto-{:03}-stateless", task_counter),
-                        TaskType::StatelessIdempotent,
-                        vec![100, 101, 102],
-                        3,
-                    ).with_capabilities(vec![cap_a.to_string()])
-                );
-                self.scheduler.submit_task(
-                    SchedulerTask::new(
-                        format!("auto-{:03}-stateful", task_counter),
-                        TaskType::StatefulLongRunning,
-                        vec![200, 201, 202],
-                        3,
-                    ).with_capabilities(vec![cap_b.to_string()])
-                );
-                task_counter += 1;
+            if pending_count > 0 {
+                info!("\n[Hub] === SCHEDULER DISPATCH ===");
+                self.dispatch_now();
             }
-
-            self.dispatch_now();
         }
     }
 

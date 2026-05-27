@@ -100,9 +100,9 @@ fn main() {
     // --- Main task submission loop ---
     loop {
         println!("  ┌─ Submit Task ───────────────────────────────────────────────┐");
-        println!("  │  [1] Stateless   — ffmpeg video transcode                  │");
-        println!("  │  [2] Stateful    — blender scene render                    │");
-        println!("  │  [3] Interactive — claude AI task                          │");
+        println!("  │  [1] Ollama inference — run a local LLM prompt             │");
+        println!("  │  [2] Stateful        — blender scene render                │");
+        println!("  │  [3] Interactive     — claude AI task                      │");
         println!("  │  [s] Swarm status                                          │");
         println!("  │  [q] Quit                                                  │");
         println!("  └─────────────────────────────────────────────────────────────┘");
@@ -111,9 +111,9 @@ fn main() {
 
         let mut choice = String::new();
         io::stdin().read_line(&mut choice).unwrap();
-        let choice = choice.trim();
+        let choice = choice.trim().to_string();
 
-        match choice {
+        match choice.as_str() {
             "q" | "Q" => {
                 println!("  Disconnecting from swarm. Goodbye.");
                 break;
@@ -131,10 +131,27 @@ fn main() {
             }
         }
 
-        let (category, cap, label) = match choice {
-            "1" => (0i32, "ffmpeg_execution",  "ffmpeg video transcode"),
-            "2" => (1i32, "blender_execution", "blender scene render"),
-            "3" => (0i32, "claude_execution",  "claude AI task"),
+        // For Ollama, prompt for the inference text before submitting
+        let ollama_prompt = if choice == "1" {
+            print!("  Prompt: ");
+            io::stdout().flush().unwrap();
+            let mut p = String::new();
+            io::stdin().read_line(&mut p).unwrap();
+            let p = p.trim().to_string();
+            if p.is_empty() {
+                println!("  No prompt entered.");
+                println!();
+                continue;
+            }
+            p
+        } else {
+            String::new()
+        };
+
+        let (category, cap, label, payload, timeout) = match choice.as_str() {
+            "1" => (0i32, "ollama_execution", "ollama inference", ollama_prompt.into_bytes(), Duration::from_secs(120)),
+            "2" => (1i32, "blender_execution", "blender scene render", b"demo-payload".to_vec(), Duration::from_secs(30)),
+            "3" => (0i32, "claude_execution",  "claude AI task",       b"demo-payload".to_vec(), Duration::from_secs(30)),
             _ => unreachable!(),
         };
 
@@ -148,7 +165,7 @@ fn main() {
             task_name: task_name.clone(),
             category,
             required_capabilities: vec![cap.to_string()],
-            payload: b"demo-payload".to_vec(),
+            payload,
         };
 
         if let Err(e) = send_framed(&req_socket, 12, &submit_req) {
@@ -179,7 +196,7 @@ fn main() {
         println!();
 
         // --- Watch progress for this specific task ---
-        watch_progress(&sub_socket, &task_id, Duration::from_secs(30));
+        watch_progress(&sub_socket, &task_id, timeout);
         println!();
     }
 }
@@ -222,6 +239,14 @@ fn watch_progress(sub_socket: &NngSocket, task_id: &str, timeout: Duration) {
                 match progress.status {
                     2 => { // Completed
                         println!("  {} Task completed successfully!", checkmark());
+                        if !progress.result_text.is_empty() {
+                            println!();
+                            println!("  ┌─ Result ────────────────────────────────────────────────────┐");
+                            for line in progress.result_text.lines() {
+                                println!("  │  {}", line);
+                            }
+                            println!("  └─────────────────────────────────────────────────────────────┘");
+                        }
                         return;
                     }
                     3 => { // Failed
