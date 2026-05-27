@@ -18,7 +18,19 @@ This document outlines the phased roadmap and task checklist required to move th
 
 **Goal:** Lock down the cryptographic boundary using ECDSA hardware challenge-response and local static thumbprint databases.
 
-- [ ] **ATECC608 Driver Layer:** Finalize the bare-metal C SWI/I2C communication library in `firmware/node-key-secure` to execute hardware-locked private key operations.
+- [ ] **ATECC608 Driver Layer:** Replace the stub implementation in `firmware/node-key-secure/atecc608.c` with real I2C hardware communication targeting Linux `/dev/i2c-N`. Current code hardcodes a fake serial and generates signatures via XOR — no actual chip communication exists yet:
+  - Add `int fd` bus handle to `atecc608_device_t`; open/close the I2C device file in `atecc608_init`
+  - Implement ATECC608 wakeup-token and sleep/idle sequencing around every command group (required by the chip before any command)
+  - Implement slot-parameterised Sign command using `ATECC608_KEY_SLOT`; `ATECC608_KEY_SLOT 0` is defined but currently unreferenced
+  - Implement slot-parameterised GenKey command for key provisioning
+  - Validate against real ATECC608A hardware on the Pi over I2C before PCB spin
+- [ ] **CH552 HID Injection Firmware:** Implement the CH552G USB composite device firmware that triggers Scout on plug-in (flagged open item in hardware note — no CH552 firmware exists yet):
+  - Present simultaneously as USB HID keyboard and USB mass storage to the host
+  - Implement OS detection logic from USB enumeration signals to select the correct Scout script (`.sh` / `.command` / `.ps1`)
+  - Inject keystrokes to open a terminal and execute the appropriate script from the mass storage partition
+  - Fall back to an interactive menu if OS detection is ambiguous
+  - Validate across Windows, macOS, and Linux hosts before hardware handoff
+- [ ] **Secure Element Simulation Boundary:** Gate `SimulatedSecureElement` in `host-background-agent` behind a compile-time feature flag so the simulated key path (`simulated_node_key.der`) is unreachable in production builds. Real hardware builds must route through the ATECC608 I2C driver, not the software P-256 sim.
 - [x] **Provisioning CLI Tool:** Expand `tools/provision-keys` to inject and lock private keys in Slot 0 during provisioning and output matched public key hex thumbprints.
 - [x] **Verification Logic:** Integrate SHA-256 and ECDSA public-key signature verification in the `compute-module-core` authentication handler to validate high-entropy challenge responses against a local trusted thumbprint file.
 
