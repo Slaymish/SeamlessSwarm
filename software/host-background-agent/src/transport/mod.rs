@@ -1,5 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
+use std::process::Command;
 use socket2::{Socket, Domain, Type, Protocol};
 use nng::{Socket as NngSocket, Protocol as NngProtocol};
 use nng::options::Options;
@@ -7,6 +8,69 @@ use prost::Message;
 use rand::Rng;
 use crate::proto;
 use crate::secure_element::SimulatedSecureElement;
+
+struct CapabilityExecutor;
+
+impl CapabilityExecutor {
+    fn probe(capability: &str) -> (bool, String) {
+        match capability {
+            "ffmpeg_execution" => Self::run("ffmpeg", &["-version"]),
+            "blender_execution" => {
+                let (ok, out) = Self::run("blender", &["--version"]);
+                if ok {
+                    return (ok, out);
+                }
+                Self::run("/Applications/Blender.app/Contents/MacOS/Blender", &["--version"])
+            }
+            "handbrake_execution" => {
+                let (ok, out) = Self::run("HandBrakeCLI", &["--version"]);
+                if ok {
+                    return (ok, out);
+                }
+                let exists = std::path::Path::new("/Applications/HandBrake.app").exists();
+                (exists, if exists { "HandBrake.app bundle present".to_string() } else { "not found".to_string() })
+            }
+            "inkscape_execution" => Self::run("inkscape", &["--version"]),
+            "claude_execution" => Self::run("claude", &["--version"]),
+            cap => {
+                // For GUI-only apps, verify the .app bundle is present
+                let app_name = cap.strip_suffix("_execution").unwrap_or(cap);
+                let title_case: String = app_name.split('_')
+                    .map(|w| {
+                        let mut c = w.chars();
+                        match c.next() {
+                            None => String::new(),
+                            Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let app_path = format!("/Applications/{}.app", title_case);
+                let exists = std::path::Path::new(&app_path).exists();
+                (exists, if exists {
+                    format!("{}.app bundle present", title_case)
+                } else {
+                    format!("no executor registered for '{}'", cap)
+                })
+            }
+        }
+    }
+
+    fn run(cmd: &str, args: &[&str]) -> (bool, String) {
+        match Command::new(cmd).args(args).output() {
+            Ok(output) => {
+                let success = output.status.success();
+                let text = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                (success, if success { text } else { format!("exit {}", output.status) })
+            }
+            Err(e) => (false, format!("not found: {}", e)),
+        }
+    }
+}
 
 pub struct MdnsResponder {
     service_name: String,
@@ -178,18 +242,54 @@ impl NngClient {
                             if msg_type == 6 {
                                 if let Ok(task) = proto::TaskDefinition::decode(&task_slice[5..5+task_len]) {
                                     println!("\n[Agent] >>> RECEIVED TASK FROM SWARM: {}", task.task_id);
-                                    println!("[Agent] Target: {}, Category: {:?}, Payload Size: {}B", task.module_target, task.category, task.payload.len());
-                                    println!("[Agent] Simulating execution with live progress reporting...");
-                                    
-                                    // 1. Report 33% progress + intermediate checkpoint for Stateful
+                                    println!("[Agent] Target: {}, Category: {:?}, Payload Size: {}B",
+                                        task.module_target, task.category, task.payload.len());
+
+                                    // Probe required capabilities before starting work
+                                    let mut all_capable = true;
+                                    if task.required_capabilities.is_empty() {
+                                        println!("[Agent] No capability requirements — proceeding.");
+                                    } else {
+                                        for cap in &task.required_capabilities {
+                                            let (ok, detail) = CapabilityExecutor::probe(cap);
+                                            if ok {
+                                                println!("[Agent] Capability probe [{}]: OK — {}", cap, detail);
+                                            } else {
+                                                println!("[Agent] Capability probe [{}]: FAIL — {}", cap, detail);
+                                                all_capable = false;
+                                            }
+                                        }
+                                    }
+
+                                    if !all_capable {
+                                        println!("[Agent] Task {} REJECTED — capability requirements unmet.", task.task_id);
+                                        let progress = proto::TaskProgress {
+                                            task_id: task.task_id.clone(),
+                                            status: proto::TaskStatus::Failed as i32,
+                                            progress_percentage: 0.0,
+                                            checkpoint_data: vec![],
+                                            error_message: "capability requirements unmet on this node".to_string(),
+                                        };
+                                        let mut buf = Vec::new();
+                                        progress.encode(&mut buf).unwrap();
+                                        let mut frame = Vec::new();
+                                        frame.extend_from_slice(&((buf.len() as u32).to_be_bytes()));
+                                        frame.push(7);
+                                        frame.extend_from_slice(&buf);
+                                        let _ = progress_socket.send(&frame);
+                                        continue;
+                                    }
+
+                                    println!("[Agent] Executing task {}...", task.task_id);
+
+                                    // Stage 1 — 33% + checkpoint for stateful tasks
                                     tokio::time::sleep(Duration::from_millis(150)).await;
                                     {
                                         let checkpoint_data = if task.category == proto::TaskCategory::StatefulLongRunning as i32 {
-                                            vec![88, 99, 111, 222] // Simulated stateful checkpoint data
+                                            vec![88, 99, 111, 222]
                                         } else {
                                             vec![]
                                         };
-
                                         let progress = proto::TaskProgress {
                                             task_id: task.task_id.clone(),
                                             status: proto::TaskStatus::Running as i32,
@@ -197,18 +297,16 @@ impl NngClient {
                                             checkpoint_data,
                                             error_message: "".to_string(),
                                         };
-
                                         let mut buf = Vec::new();
                                         progress.encode(&mut buf).unwrap();
-
                                         let mut frame = Vec::new();
                                         frame.extend_from_slice(&((buf.len() as u32).to_be_bytes()));
-                                        frame.push(7); // MsgType 7 = TaskProgress
+                                        frame.push(7);
                                         frame.extend_from_slice(&buf);
                                         let _ = progress_socket.send(&frame);
                                     }
 
-                                    // 2. Report 66% progress
+                                    // Stage 2 — 66%
                                     tokio::time::sleep(Duration::from_millis(150)).await;
                                     {
                                         let progress = proto::TaskProgress {
@@ -218,18 +316,16 @@ impl NngClient {
                                             checkpoint_data: vec![],
                                             error_message: "".to_string(),
                                         };
-
                                         let mut buf = Vec::new();
                                         progress.encode(&mut buf).unwrap();
-
                                         let mut frame = Vec::new();
                                         frame.extend_from_slice(&((buf.len() as u32).to_be_bytes()));
-                                        frame.push(7); // MsgType 7 = TaskProgress
+                                        frame.push(7);
                                         frame.extend_from_slice(&buf);
                                         let _ = progress_socket.send(&frame);
                                     }
 
-                                    // 3. Report Completed progress
+                                    // Stage 3 — 100% complete
                                     tokio::time::sleep(Duration::from_millis(150)).await;
                                     {
                                         let progress = proto::TaskProgress {
@@ -239,13 +335,11 @@ impl NngClient {
                                             checkpoint_data: vec![],
                                             error_message: "".to_string(),
                                         };
-
                                         let mut buf = Vec::new();
                                         progress.encode(&mut buf).unwrap();
-
                                         let mut frame = Vec::new();
                                         frame.extend_from_slice(&((buf.len() as u32).to_be_bytes()));
-                                        frame.push(7); // MsgType 7 = TaskProgress
+                                        frame.push(7);
                                         frame.extend_from_slice(&buf);
                                         let _ = progress_socket.send(&frame);
                                     }

@@ -30,6 +30,8 @@ This document outlines the phased roadmap and task checklist required to move th
 
 - [x] **Dynamic Capability Discovery:** Implement system-level profiling (CPU cores, memory, OS platform, GPU accelerators) in `host-background-agent`'s Scout Engine and stream updates over NNG.
 - [x] **Ephemeral Registry indexing:** Optimize the thread-safe `EphemeralRegistry` in `compute-module-core` to dynamically index and expire profiles upon heartbeat timeout.
+- [x] **Capability-Driven Task Routing:** Tasks declare `required_capabilities` (e.g. `ffmpeg_execution`, `blender_execution`) in `TaskDefinition`. The scheduler filters the node pool to only capable nodes before dispatch; tasks without a matching node remain `Pending` until one appears. Covered by `test_capability_driven_dispatch`.
+- [x] **Capability Execution Dispatch (Agent):** Agent probes each required capability against the real local environment before accepting a task — invoking actual binaries (`ffmpeg -version`, `blender --version`, app-bundle presence checks). Tasks failing the probe are rejected with a `Failed` progress report rather than silently executing.
 - [ ] **Task Taxonomy Scheduling:**
   - **Stateless:** Distribute over parallel worker queues with immediate automated reassignment.
   - **Stateful:** Implement periodic metadata tracking with last-known snapshot recovery.

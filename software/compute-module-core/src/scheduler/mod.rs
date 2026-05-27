@@ -1,4 +1,4 @@
-use crate::registry::EphemeralRegistry;
+use crate::registry::{EphemeralRegistry, NodeProfile};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -25,6 +25,7 @@ pub struct Task {
     pub max_retries: usize,
     pub state: TaskState,
     pub current_retry: usize,
+    pub required_capabilities: Vec<String>,
 }
 
 impl Task {
@@ -36,7 +37,13 @@ impl Task {
             max_retries,
             state: TaskState::Pending,
             current_retry: 0,
+            required_capabilities: Vec::new(),
         }
+    }
+
+    pub fn with_capabilities(mut self, caps: Vec<String>) -> Self {
+        self.required_capabilities = caps;
+        self
     }
 }
 
@@ -158,8 +165,15 @@ impl ProfileScheduler {
             let mut node_idx = 0;
             for task in lock.values_mut() {
                 if task.state == TaskState::Pending {
-                    // Match with an active node
-                    let target_node = &nodes[node_idx % nodes.len()];
+                    let capable: Vec<&NodeProfile> = nodes.iter()
+                        .filter(|n| node_matches_capabilities(n, &task.required_capabilities))
+                        .collect();
+
+                    if capable.is_empty() {
+                        continue;
+                    }
+
+                    let target_node = capable[node_idx % capable.len()];
                     task.state = TaskState::Running {
                         node_id: target_node.node_id.clone(),
                         started_at: current_time,
@@ -213,6 +227,14 @@ impl ProfileScheduler {
     }
 }
 
+fn node_matches_capabilities(node: &NodeProfile, required: &[String]) -> bool {
+    if required.is_empty() {
+        return true;
+    }
+    let values: Vec<&str> = node.capabilities.iter().map(|c| c.value.as_str()).collect();
+    required.iter().all(|req| values.contains(&req.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +252,7 @@ mod tests {
             max_retries: 2,
             state: TaskState::Pending,
             current_retry: 0,
+            required_capabilities: vec![],
         };
         let t2 = Task {
             task_id: "t2".to_string(),
@@ -238,6 +261,7 @@ mod tests {
             max_retries: 2,
             state: TaskState::Pending,
             current_retry: 0,
+            required_capabilities: vec![],
         };
         let t3 = Task {
             task_id: "t3".to_string(),
@@ -246,6 +270,7 @@ mod tests {
             max_retries: 2,
             state: TaskState::Pending,
             current_retry: 0,
+            required_capabilities: vec![],
         };
 
         assert!(matches!(scheduler.schedule_task(&t1, "none"), ExecutionResult::RetryNeeded(_)));
@@ -264,6 +289,7 @@ mod tests {
             max_retries: 2,
             state: TaskState::Pending,
             current_retry: 0,
+            required_capabilities: vec![],
         };
 
         let active_node = NodeProfile {
@@ -298,6 +324,7 @@ mod tests {
             max_retries: 2,
             state: TaskState::Pending,
             current_retry: 0,
+            required_capabilities: vec![],
         };
 
         let node = NodeProfile {
@@ -322,6 +349,7 @@ mod tests {
             max_retries: 2,
             state: TaskState::Pending,
             current_retry: 0,
+            required_capabilities: vec![],
         };
 
         let normal_node = NodeProfile {
@@ -396,5 +424,47 @@ mod tests {
         let recovered_interactive = scheduler.get_task("t-interactive").unwrap();
         assert!(matches!(recovered_interactive.state, TaskState::Failed { .. }));
         assert_eq!(recovered_interactive.current_retry, 0); // bypassed retries!
+    }
+
+    #[test]
+    fn test_capability_driven_dispatch() {
+        use crate::registry::Capability;
+
+        let registry = EphemeralRegistry::new();
+        let scheduler = ProfileScheduler::new(registry.clone());
+
+        // Two tasks — each requires a different capability
+        let task_ffmpeg = Task::new("t-ffmpeg".to_string(), TaskType::StatelessIdempotent, vec![], 1)
+            .with_capabilities(vec!["ffmpeg_execution".to_string()]);
+        let task_blender = Task::new("t-blender".to_string(), TaskType::StatelessIdempotent, vec![], 1)
+            .with_capabilities(vec!["blender_execution".to_string()]);
+        let task_any = Task::new("t-any".to_string(), TaskType::StatelessIdempotent, vec![], 1);
+
+        scheduler.submit_task(task_ffmpeg);
+        scheduler.submit_task(task_blender);
+        scheduler.submit_task(task_any);
+
+        // Only one node — it has ffmpeg but not blender
+        let node = NodeProfile {
+            node_id: "n1".to_string(),
+            os_platform: "macOS".to_string(),
+            capabilities: vec![
+                Capability { name: "creative_capability_ffmpeg".to_string(), val_type: "string".to_string(), value: "ffmpeg_execution".to_string() },
+            ],
+            last_seen: 1200,
+            public_key: "".to_string(),
+        };
+        registry.register_node(node);
+
+        let dispatches = scheduler.dispatch_pending_tasks(1000);
+
+        // ffmpeg task and unconstrained task should dispatch; blender task should be held
+        assert_eq!(dispatches.len(), 2);
+        assert!(dispatches.iter().any(|(id, _)| id == "t-ffmpeg"));
+        assert!(dispatches.iter().any(|(id, _)| id == "t-any"));
+        assert!(!dispatches.iter().any(|(id, _)| id == "t-blender"));
+
+        // blender task must remain Pending
+        assert_eq!(scheduler.get_task("t-blender").unwrap().state, TaskState::Pending);
     }
 }

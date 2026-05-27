@@ -271,19 +271,27 @@ impl SwarmHubServer {
                 .count();
             
             if pending_count == 0 {
-                // Submit a Stateless and Stateful task for testing
+                // Alternate capability requirements each round to exercise routing
+                let (stateless_cap, stateful_cap) = if task_counter % 2 == 1 {
+                    ("ffmpeg_execution", "blender_execution")
+                } else {
+                    ("blender_execution", "ffmpeg_execution")
+                };
+
                 let task_stateless = SchedulerTask::new(
                     format!("task-{:03}-stateless", task_counter),
                     TaskType::StatelessIdempotent,
                     vec![100, 101, 102],
                     3,
-                );
+                ).with_capabilities(vec![stateless_cap.to_string()]);
+
                 let task_stateful = SchedulerTask::new(
                     format!("task-{:03}-stateful", task_counter),
                     TaskType::StatefulLongRunning,
                     vec![200, 201, 202],
                     3,
-                );
+                ).with_capabilities(vec![stateful_cap.to_string()]);
+
                 self.scheduler.submit_task(task_stateless);
                 self.scheduler.submit_task(task_stateful);
                 task_counter += 1;
@@ -298,8 +306,13 @@ impl SwarmHubServer {
             let dispatches = self.scheduler.dispatch_pending_tasks(current_time);
             for (task_id, node_id) in dispatches {
                 if let Some(task) = self.scheduler.get_task(&task_id) {
-                    println!("[Hub] Dispatching task {} to node {}...", task_id, node_id);
-                    
+                    if task.required_capabilities.is_empty() {
+                        println!("[Hub] Dispatching task {} to node {}...", task_id, node_id);
+                    } else {
+                        println!("[Hub] Dispatching task {} to node {} (requires: {})...",
+                            task_id, node_id, task.required_capabilities.join(", "));
+                    }
+
                     let category = match task.task_type {
                         TaskType::StatelessIdempotent => proto::TaskCategory::StatelessIdempotent as i32,
                         TaskType::StatefulLongRunning => proto::TaskCategory::StatefulLongRunning as i32,
@@ -313,6 +326,7 @@ impl SwarmHubServer {
                         payload: task.payload.clone(),
                         max_retries: task.max_retries as u32,
                         timeout_ms: 10000,
+                        required_capabilities: task.required_capabilities.clone(),
                     };
 
                     let mut encoded_task = Vec::new();

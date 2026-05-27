@@ -62,6 +62,7 @@ message TaskDefinition {
   bytes payload = 4;
   uint32 max_retries = 5;
   uint32 timeout_ms = 6;
+  repeated string required_capabilities = 7;
 }
 
 message TaskProgress {
